@@ -1,7 +1,7 @@
 -- LiLiBanque: pure data layer, Lua 5.1. No WoW globals or executable deserialization.
 LiLiBanque = LiLiBanque or {}
 local C = {}; LiLiBanque.Core = C
-C.VERSION = '1.2.0'
+C.VERSION = '1.2.1'
 local moneyKinds = {deposit=true,withdraw=true,repair=true,withdrawForTab=true,buyTab=true,depositSummary=true}
 local eventKinds = {join=true,leave=true,remove=true,promote=true,demote=true,invite=true}
 function C.copy(t) local o={}; for k,v in pairs(t) do o[k]=v end; return o end
@@ -46,7 +46,7 @@ local function resolve(aliases,id)
     return id
 end
 -- One claim per origin per occurrence: repeated equal rows from an officer are NOT a set.
-function C.merge(db,s,col,r,used)
+local function mergeOne(db,s,col,r,used)
     if not C.valid(col,r) then return nil,false end
     local aliases,claims=tables(s,col); local records=db[col]; local incoming=r.id
     local id=resolve(aliases,incoming)
@@ -79,6 +79,71 @@ function C.merge(db,s,col,r,used)
     records[incoming]=C.copy(r); claims[incoming]={[src]=incoming}
     if used then used[incoming]=true end
     return incoming,true
+end
+-- Original observations stay per-character, never in the exported DB. Migrate the
+-- old claim IDs before a canonical ID hides their origin. Old states did not keep
+-- each observation's timestamp, so use their existing representative conservatively.
+function C.observations(db,s,col)
+    s.observations=s.observations or {}
+    if not s.observations[col] then
+        local all={}; local _,claims=tables(s,col)
+        for id,r in pairs(db[col]) do
+            all[id]=C.copy(r)
+            for _,claim in pairs(claims[id] or {}) do
+                local copy=C.copy(r); copy.id=claim
+                if C.valid(col,copy) then all[claim]=copy end
+            end
+        end
+        s.observations[col]=all
+    end
+    return s.observations[col]
+end
+function C.merge(db,s,col,r,used)
+    if not C.valid(col,r) then return nil,false end
+    local all=C.observations(db,s,col); local aliases,claims=tables(s,col)
+    if all[r.id] then
+        local id=resolve(aliases,r.id)
+        if used then used[id]=true end
+        return id,false
+    end
+    all[r.id]=C.copy(r)
+    -- Reconcile only the connected overlap component. Replay *original* IDs in
+    -- lexical order so the same evidence gives identical occurrence slots even
+    -- when officers receive D messages in different orders.
+    local group={[r.id]=r}; local changed=true
+    while changed do
+        changed=false
+        for id,v in pairs(all) do
+            if not group[id] then
+                for _,known in pairs(group) do
+                    if C.same(v,known,col) then group[id]=v; changed=true; break end
+                end
+            end
+        end
+    end
+    local before=0; local removed={}
+    for id in pairs(group) do
+        local canonical=resolve(aliases,id)
+        if db[col][canonical] and not removed[canonical] then
+            removed[canonical]=true; before=before+1
+        end
+    end
+    local ids={}; for id in pairs(group) do ids[#ids+1]=id end; table.sort(ids)
+    local rebuilt={[col]={}}; local state={aliases={},claims={},markers={}}
+    for _,id in ipairs(ids) do mergeOne(rebuilt,state,col,group[id]) end
+    for id in pairs(removed) do db[col][id]=nil; claims[id]=nil end
+    for id in pairs(group) do aliases[id]=nil end
+    local after=0
+    for id,v in pairs(rebuilt[col]) do
+        db[col][id]=v; claims[id]=state.claims[col][id]; after=after+1
+    end
+    for _,id in ipairs(ids) do
+        local canonical=resolve(state.aliases[col],id)
+        if canonical~=id then aliases[id]=canonical end
+    end
+    local id=resolve(aliases,r.id)
+    if used then used[id]=true end
+    return id,after>before
 end
 function C.scan(db,s,col,rows,now,source)
     local aliases,_,markers=tables(s,col); local prev=markers[source] or {}; local used={}; local ids={}; local added=0

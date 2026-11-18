@@ -18,12 +18,12 @@ function S.new(db,state,name,guild,send,clock,wallTime)
         if at then self:packet('B',target,'bankScan',{at}) end
     end
     function self:hello(target)
-        for _,col in ipairs({'ledger','events'}) do local digest=W.digest(self.db[col]); self:packet('H',target,col,{digest}) end
+        for _,col in ipairs({'ledger','events'}) do local digest=W.digest(C.observations(self.db,self.state,col)); self:packet('H',target,col,{digest}) end
         self:bankScan(target)
         self.nextHello=self.clock()+120
     end
     function self:inventory(col,target)
-        local _,ids=W.digest(self.db[col])
+        local _,ids=W.digest(C.observations(self.db,self.state,col))
         for start=1,#ids,30 do
             local page={}; for i=start,math.min(start+29,#ids) do page[#page+1]=ids[i] end
             self:packet('I',target,col,page)
@@ -67,7 +67,7 @@ function S.new(db,state,name,guild,send,clock,wallTime)
         end
         if col~='ledger' and col~='events' then return end
         if op=='H' then
-            local digest=W.digest(self.db[col])
+            local digest=W.digest(C.observations(self.db,self.state,col))
             if f[5]~=digest and (not peer.hello[col] or now-peer.hello[col]>=30) then
                 peer.hello[col]=now; self:inventory(col,peerName)
                 self:packet('H',peerName,col,{digest})
@@ -75,13 +75,13 @@ function S.new(db,state,name,guild,send,clock,wallTime)
         elseif op=='I' then
             local missing={}
             for i=5,math.min(#f,34) do
-                local id=f[i]; local aliases=self.state.aliases[col] or {}; local hops=0
-                while aliases[id] and hops<100 do id=aliases[id]; hops=hops+1 end
-                if not self.db[col][id] then missing[#missing+1]=f[i] end
+                local id=f[i]
+                if not C.observations(self.db,self.state,col)[id] then missing[#missing+1]=id end
             end
             if #missing>0 then self:packet('R',peerName,col,missing) end
         elseif op=='R' then
-            for i=5,math.min(#f,34) do local r=self.db[col][f[i]]; if r then self:record(col,peerName,r) end end
+            local observations=C.observations(self.db,self.state,col)
+            for i=5,math.min(#f,34) do local r=observations[f[i]]; if r then self:record(col,peerName,r) end end
         elseif op=='D' then
             local r
             if col=='ledger' then r={id=f[5],kind=f[6],name=f[7],copper=tonumber(f[8]),ts=tonumber(f[9]),tsPrecision=tonumber(f[10]),source=f[11],seenAt=tonumber(f[12])}

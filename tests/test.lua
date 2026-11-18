@@ -72,6 +72,156 @@ test('handshake ne transporte que le manquant entre deux officiers',function()
  eq(y.transferred,2)
 end)
 
+-- A real H/I/R/D exchange, not a copy of canonical DB rows: origin evidence must travel.
+local function network(names,oldIndex)
+ local core=loadCore(); assert(loadfile(ROOT..'/LiLiBanque/Wire.lua'))()
+ assert(loadfile(ROOT..'/LiLiBanque/Sync.lua'))(); local sync=LiLiBanque.Sync
+ local oldSync,oldCore
+ if oldIndex then
+  assert(loadfile(ROOT..'/tests/compat/core-1.2.0.lua'))(); oldCore=LiLiBanque.Core
+  assert(loadfile(ROOT..'/tests/compat/sync-1.1.1.lua'))(); oldSync=LiLiBanque.Sync
+  LiLiBanque.Core=core; LiLiBanque.Sync=sync
+ end
+ local net={now=0,peers={},messages={}}
+ for i,name in ipairs(names) do
+  local peerCore=i==oldIndex and oldCore or core
+  local db,state=peerCore.init(nil,nil,'G'); local p={db=db,state=state,name=name,core=peerCore}; net.peers[i]=p
+  p.sync=(i==oldIndex and oldSync or sync).new(db,state,name,'G',function(m)
+   net.messages[#net.messages+1]={from=i,msg=m}; return 0
+  end,function() return net.now end,function() return 200000 end)
+ end
+ function net:scan(i,n,at)
+  local rows={}; for _=1,n do rows[#rows+1]=row('Donateur Inventé') end
+  return self.peers[i].core.scan(self.peers[i].db,self.peers[i].state,'ledger',rows,at,self.peers[i].name)
+ end
+ function net:exchange(order,steps)
+  order=order or {1,2}
+  for _,i in ipairs(order) do self.peers[i].sync:hello() end
+  for _=1,steps or 180 do
+   self.now=self.now+1
+   for _,i in ipairs(order) do self.peers[i].sync:tick(self.now,false) end
+   while #self.messages>0 do
+    local m=table.remove(self.messages,1)
+    for _,i in ipairs(order) do if i~=m.from then self.peers[i].sync:receive(m.msg,'OFFICER',self.peers[m.from].name) end end
+   end
+  end
+ end
+ function net:check(n)
+  local expected=self.peers[1].db.ledger
+  for _,p in ipairs(self.peers) do
+   eq(count(p.db.ledger),n)
+   for id,r in pairs(expected) do
+    local other=assert(p.db.ledger[id],'ID divergent : '..id)
+    for k,v in pairs(r) do eq(other[k],v) end
+   end
+   eq(count(p.db),9); eq(#p.db.gaps,0)
+  end
+ end
+ return net
+end
+test('régression : Zelvor 3 dépôts identiques après canonisation Mage, synchro sans perte',function()
+ local net=network({'Zelvor','Mage'})
+ eq(net:scan(1,2,100000),2); eq(net:scan(2,2,100900),2)
+ for _,r in pairs(net.peers[2].db.ledger) do C.merge(net.peers[1].db,net.peers[1].state,'ledger',r) end
+ eq(count(net.peers[1].db.ledger),2)
+ eq(net:scan(1,3,100950),1); eq(count(net.peers[1].db.ledger),3)
+ net:exchange(); net:check(3)
+end)
+
+test('trois officiers : maximum et convergence pour les six ordres, relevés répétés',function()
+ local orders={{1,2,3},{1,3,2},{2,1,3},{2,3,1},{3,1,2},{3,2,1}}
+ for _,order in ipairs(orders) do
+  local net=network({'Zelvor','Mage','Alor'})
+  net:scan(1,2,100000); net:scan(2,2,100100); net:scan(3,1,100200)
+  for _,r in pairs(net.peers[2].db.ledger) do C.merge(net.peers[1].db,net.peers[1].state,'ledger',r) end
+  net:scan(1,3,100300); net:exchange(order); net:check(3)
+  for round=1,3 do
+   eq(net:scan(1,3,100300+round),0); eq(net:scan(2,3,100400+round),0); eq(net:scan(3,2,100500+round),0)
+   net:exchange(order); net:check(3)
+  end
+  eq(net:scan(3,4,100600),1); net:exchange(order); net:check(4)
+  local transferred={}; for i,p in ipairs(net.peers) do transferred[i]=p.sync.transferred end
+  net:exchange(order)
+  for i,p in ipairs(net.peers) do eq(p.sync.transferred,transferred[i]) end
+ end
+end)
+test('preuves originales reçues en ordre inverse ou entrelacé : même ensemble, pas somme',function()
+ C=loadCore(); local evidence={}
+ for source,n in pairs({Zelvor=4,Mage=2,Alor=3}) do
+  local db,s=C.init(nil,nil,'G'); local rows={}; for _=1,n do rows[#rows+1]=row('A') end
+  C.scan(db,s,'ledger',rows,100000,source)
+  for _,r in pairs(db.ledger) do evidence[#evidence+1]=r end
+ end
+ table.sort(evidence,function(a,b) return a.id<b.id end)
+ local expected
+ for _,order in ipairs({{1,2,3,4,5,6,7,8,9},{9,8,7,6,5,4,3,2,1},{9,1,5,2,8,4,7,3,6}}) do
+  local db,s=C.init(nil,nil,'G')
+  for _,i in ipairs(order) do C.merge(db,s,'ledger',evidence[i]) end
+  eq(count(db.ledger),4)
+  if expected then for id in pairs(expected) do assert(db.ledger[id],'ordre différent : '..id) end else expected=db.ledger end
+  for _=1,3 do for _,i in ipairs(order) do C.merge(db,s,'ledger',evidence[i]) end end
+  eq(count(db.ledger),4)
+ end
+end)
+test('migration des claims 1.2.0 : origine conservée après reload, DB inchangée',function()
+ C=loadCore(); local db,s=C.init(nil,nil,'G')
+ for i=1,2 do
+  local id='L:Mage:100100:'..i; local old='L:Zelvor:100000:'..i
+  local r=row('Donateur Inventé'); r.id=id; r.source='Zelvor'; r.seenAt=100000; db.ledger[id]=r
+  s.claims.ledger=s.claims.ledger or {}; s.claims.ledger[id]={Mage=id,Zelvor=old}
+  s.aliases.ledger=s.aliases.ledger or {}; s.aliases.ledger[old]=id
+ end
+ s.seq=2; s.markers.ledger={Zelvor={'L:Zelvor:100000:1','L:Zelvor:100000:2'}}
+ eq(count(C.observations(db,s,'ledger')),4)
+ local rows={row('Donateur Inventé'),row('Donateur Inventé'),row('Donateur Inventé')}
+ eq(C.scan(db,s,'ledger',rows,100200,'Zelvor'),1); eq(count(db.ledger),3)
+ local reloaded,rs=C.init(db,s,'G'); eq(C.scan(reloaded,rs,'ledger',rows,100300,'Zelvor'),0)
+ eq(count(reloaded.ledger),3); eq(count(reloaded),9)
+ local peer,ps=C.init(nil,nil,'G')
+ for _,r in pairs(C.observations(reloaded,rs,'ledger')) do C.merge(peer,ps,'ledger',r) end
+ eq(count(peer.ledger),3); for id in pairs(reloaded.ledger) do assert(peer.ledger[id]) end
+end)
+test('fenêtres disjointes et types/noms/montants différents restent distincts',function()
+ C=loadCore(); local db,s=C.init(nil,nil,'G')
+ local rows={row('A'),row('A'),row('A',120000),row('B'),row('A'),row('A')}
+ rows[5].copper=60000; rows[6].kind='withdraw'
+ C.scan(db,s,'ledger',rows,120100,'Zelvor')
+ C.scan(db,s,'ledger',rows,120200,'Mage')
+ eq(count(db.ledger),6)
+end)
+test('régression envoyée au vrai Core 1.2.0 + Sync 1.1.1 : protocole conservé',function()
+ do
+  local net=network({'Zelvor','Mage'},2)
+  net:scan(1,2,100000); net:scan(2,2,100900)
+  for _,r in pairs(net.peers[2].db.ledger) do C.merge(net.peers[1].db,net.peers[1].state,'ledger',r) end
+  net:scan(1,3,100950); net:exchange(); net:check(3)
+  net:scan(2,4,101000); net:exchange(); net:check(4)
+ end
+end)
+
+test('réception depuis un ancien pair : journal distinct paginé et idempotent',function()
+ local net=network({'Zelvor','Mage'},1); local source=net.peers[1]
+ local rows={}; for i=1,35 do rows[i]=row('Donateur '..i) end
+ source.core.scan(source.db,source.state,'ledger',rows,100000,source.name)
+ net:exchange(nil,600); net:check(35)
+ local transferred=net.peers[2].sync.transferred
+ net:exchange(nil,300); net:check(35); eq(net.peers[2].sync.transferred,transferred)
+end)
+test('événements identiques : preuves par origine et ordre déterministe',function()
+ C=loadCore(); local all={}
+ for source,n in pairs({Zelvor=3,Mage=2,Alor=1}) do
+  local db,s=C.init(nil,nil,'G'); local rows={}
+  for i=1,n do rows[i]={kind='promote',player='Recrue Inventée',actor='Chef Inventé',rank='Officier',ts=100000,tsPrecision=3600} end
+  C.scan(db,s,'events',rows,100000,source)
+  for _,r in pairs(db.events) do all[#all+1]=r end
+ end
+ table.sort(all,function(a,b) return a.id<b.id end)
+ local a,sa=C.init(nil,nil,'G'); local b,sb=C.init(nil,nil,'G')
+ for i=1,#all do C.merge(a,sa,'events',all[i]); C.merge(b,sb,'events',all[#all-i+1]) end
+ eq(count(a.events),3); eq(count(b.events),3)
+ for id,r in pairs(a.events) do assert(b.events[id]); eq(b.events[id].rank,r.rank) end
+end)
+
 local MOCK=assert(loadfile(ROOT..'/tests/wowmock.lua'))()
 CHAT={}
 local function chat(pattern) for i=#CHAT,1,-1 do if CHAT[i]:find(pattern,1,true) then return CHAT[i] end end; return nil end
@@ -120,7 +270,7 @@ test('événements WoW réels simulés : banque, roster, recrues et UI',function
 end)
 test('chargement unique : message de version une fois, /lili et /lilibanque',function()
  local A=loadAddon(); fire('PLAYER_LOGIN')
- eq(#CHAT,1); assert(CHAT[1]:find('version 1.2.0 chargée — /lili',1,true),CHAT[1])
+ eq(#CHAT,1); assert(CHAT[1]:find('version 1.2.1 chargée — /lili',1,true),CHAT[1])
  eq(SLASH_LILIBANQUE1,'/lili'); eq(SLASH_LILIBANQUE2,'/lilibanque')
  SlashCmdList.LILIBANQUE(''); assert(LiLiBanqueFrame:IsShown(),'fenêtre ouverte par /lili')
  SlashCmdList.LILIBANQUE('  '); assert(not LiLiBanqueFrame:IsShown(),'second /lili referme')
@@ -198,7 +348,7 @@ test('erreur Lua capturée : message en jeu et détail dans /lili diag',function
  eq(LiLiBanqueState.lastError.where,'GUILDBANKLOG_UPDATE')
  CHAT={}; SlashCmdList.LILIBANQUE('diag')
  local line=chat('Dernière erreur Lua : '); assert(line and line:find('boom de test',1,true) and line:find('[GUILDBANKLOG_UPDATE]',1,true),tostring(line))
- assert(chat('LiLiBanque 1.2.0 ; client 1.60.1 (70959), interface 16001'))
+ assert(chat('LiLiBanque 1.2.1 ; client 1.60.1 (70959), interface 16001'))
  assert(chat('Banque ouverte : oui (signal : événement) ; GuildBankFrame : chargé, affiché ; Blizzard_GuildBankUI chargé : oui ; onglets achetés : 1'))
  assert(chat('Notes d’officier lisibles : oui'))
  -- Errors survive a /reload through the per-character state.

@@ -15,11 +15,15 @@ import zlib
 try:
     from lupa.lua51 import LuaRuntime
 except ImportError:
-    sys.path.insert(0, '/opt/data/cache/scratch/lili-lua')
+    import os
+    if not os.environ.get('LUPA_PATH'):
+        raise
+    sys.path.insert(0, os.environ['LUPA_PATH'])
     from lupa.lua51 import LuaRuntime
 ROOT = Path(__file__).resolve().parents[1]
 # Exact Sync.lua shipped in v1.1.1: the compatibility test must run the real old receiver.
 assert hashlib.sha256((ROOT / 'tests/compat/sync-1.1.1.lua').read_bytes()).hexdigest() == '270cdcc94503a4dc8646b5c8e8b5aecf29b7e38a15892154f44bb396dcecf1af'
+assert hashlib.sha256((ROOT / 'tests/compat/core-1.2.0.lua').read_bytes()).hexdigest() == '7ee3eb33de6c8afff068ae263a2da0183fa85d1ae4ef3e9cf9a03668e75e5681'
 # encoding=None: Lua strings stay bytes, so invalid UTF-8 in test data reaches Python intact.
 lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
 lua_type = lua.eval(b'type')
