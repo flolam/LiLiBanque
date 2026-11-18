@@ -1,0 +1,16 @@
+# The release workflow uses scripts/package.py (equivalent packager) as authority.
+# These rules also describe the intended archive layout for BigWigs tooling.
+package-as: LiLiBanque
+move-folders:
+  LiLiBanque/LiLiBanque: LiLiBanque
+ignore:
+  - .github
+  - .gitignore
+  - .pkgmeta
+  - tests
+  - fixtures
+  - scripts
+  - dist
+  - README.md
+  - LICENSE
+  - requirements-test.txt

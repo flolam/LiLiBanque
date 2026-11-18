@@ -1,0 +1,14 @@
+## Interface: 16001
+## Title: LiLiBanque
+## Notes: Relevés et synchronisation des cotisations — La Bande à Li Li
+## Author: La Bande à Li Li
+## Version: 1.1.1
+## SavedVariables: LiLiBanqueDB
+## SavedVariablesPerCharacter: LiLiBanqueState
+
+Core.lua
+Wire.lua
+Sync.lua
+Export.lua
+Addon.lua
+UI.lua

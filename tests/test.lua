@@ -1,0 +1,424 @@
+local tests, passed = {}, 0
+function test(name, fn) tests[#tests+1]={name,fn} end
+function eq(a,b) assert(a==b, tostring(a)..' ~= '..tostring(b)) end
+function count(t) local n=0; for _ in pairs(t) do n=n+1 end; return n end
+function loadCore() LiLiBanque={}; assert(loadfile(ROOT..'/LiLiBanque/Core.lua'))(); return LiLiBanque.Core end
+local C
+local function row(name,ts) return {kind='deposit',name=name,copper=40000,ts=ts or 100000,tsPrecision=3600} end
+test('premier scan et chevauchement sans doublon',function()
+ C=loadCore(); local db,s=C.init(nil,nil,'La Bande à Li Li')
+ eq(C.scan(db,s,'ledger',{row('A'),row('B')},100010,'Flo'),2)
+ eq(C.scan(db,s,'ledger',{row('A'),row('B'),row('C')},100020,'Flo'),1)
+ eq(C.scan(db,s,'ledger',{row('B'),row('C')},100030,'Flo'),0)
+ eq(count(db.ledger),3); eq(#db.gaps,0)
+end)
+test('rotation signale un trou sans multiplier les alertes',function()
+ local db,s=C.init(nil,nil,'G'); C.scan(db,s,'ledger',{row('A'),row('B')},100000,'Flo')
+ eq(C.scan(db,s,'ledger',{row('C'),row('D')},110000,'Flo'),2)
+ eq(#db.gaps,1); eq(db.gaps[1].reason,'rollover')
+ C.scan(db,s,'ledger',{row('C'),row('D')},110010,'Flo'); eq(#db.gaps,1)
+end)
+test('occurrences identiques et fusion inter-officiers décalée',function()
+ local a,sa=C.init(nil,nil,'G'); local b,sb=C.init(nil,nil,'G')
+ C.scan(a,sa,'ledger',{row('A'),row('A')},100000,'Flo')
+ C.scan(b,sb,'ledger',{row('A',100900),row('A',100900)},100900,'Mage')
+ for _,r in pairs(b.ledger) do C.merge(a,sa,'ledger',r) end
+ eq(count(a.ledger),2)
+ C.scan(a,sa,'ledger',{row('A'),row('A'),row('A')},100950,'Flo'); eq(count(a.ledger),3)
+ for _,r in pairs(b.ledger) do C.merge(a,sa,'ledger',r) end; eq(count(a.ledger),3)
+ for _,r in pairs(a.ledger) do C.merge(b,sb,'ledger',r) end; eq(count(b.ledger),3)
+ for id in pairs(a.ledger) do assert(b.ledger[id], 'identifiants convergents') end
+end)
+test('horodatage et solde dédupliqué',function()
+ local ts,p=C.age(200000,0,0,1,2); eq(ts,106400); eq(p,86400)
+ local db=C.init(nil,nil,'G'); C.money(db,1,40000); C.money(db,2,40000); C.money(db,3,80000); eq(#db.bankMoney,2)
+end)
+test('transport découpe et réassemble sans exécuter de Lua',function()
+ assert(loadfile(ROOT..'/LiLiBanque/Wire.lua'))(); local W=LiLiBanque.Wire
+ local payload=W.pack({'D','ledger','L:Flo:1:1','deposit','Brenø Nom',40000,100000,3600,'Flo',100100,string.rep('é;%',300)})
+ local chunks=W.chunks(payload,'abc'); assert(#chunks>1)
+ local rx=W.receiver(); local out
+ for i=#chunks,1,-1 do assert(#chunks[i]<255); out=rx:push('Mage',chunks[i],1) or out end
+ local values=W.unpack(out); eq(values[5],'Brenø Nom'); eq(values[11],string.rep('é;%',300))
+ eq(rx:push('Mage','garbage',1),nil)
+end)
+test('file de débit conserve lockdown et throttle puis reprend',function()
+ local W=LiLiBanque.Wire; local result=11; local calls=0
+ local q=W.queue(function(msg) calls=calls+1; return result end)
+ q:add('hello'); q:tick(0,true); eq(calls,0); eq(q:size(),1)
+ q:tick(3,false); eq(calls,1); eq(q:size(),1)
+ result=3; q:tick(9,false); eq(q:size(),1)
+ result=0; q:tick(15,false); eq(q:size(),0)
+end)
+test('handshake ne transporte que le manquant entre deux officiers',function()
+ assert(loadfile(ROOT..'/LiLiBanque/Sync.lua'))(); local S=LiLiBanque.Sync
+ local a,sa=C.init(nil,nil,'G'); local b,sb=C.init(nil,nil,'G')
+ C.scan(a,sa,'ledger',{row('A'),row('A')},100000,'Flo')
+ local now=0; local aq,bq={},{}
+ local x=S.new(a,sa,'Flo','G',function(m) aq[#aq+1]=m; return 0 end,function() return now end)
+ local y=S.new(b,sb,'Mage','G',function(m) bq[#bq+1]=m; return 0 end,function() return now end)
+ x:hello(); y:hello()
+ for n=1,1000 do
+  now=n; x:tick(now,false); y:tick(now,false)
+  while #aq>0 do y:receive(table.remove(aq,1),'OFFICER','Flo-Surname-CAMWOWEU4Realm7PvP') end
+  while #bq>0 do x:receive(table.remove(bq,1),'OFFICER','Mage') end
+ end
+ eq(count(b.ledger),2); eq(x.transferred,0); eq(y.transferred,2)
+ x:hello(); y:hello()
+ for n=1001,1100 do now=n; x:tick(now,false); y:tick(now,false)
+  while #aq>0 do y:receive(table.remove(aq,1),'OFFICER','Flo-Surname-CAMWOWEU4Realm7PvP') end
+  while #bq>0 do x:receive(table.remove(bq,1),'OFFICER','Mage') end
+ end
+ eq(y.transferred,2)
+end)
+
+local MOCK=assert(loadfile(ROOT..'/tests/wowmock.lua'))()
+CHAT={}
+local function chat(pattern) for i=#CHAT,1,-1 do if CHAT[i]:find(pattern,1,true) then return CHAT[i] end end; return nil end
+-- Loads the six TOC files in order, like the client, against the strict widget mock.
+local function loadAddon(keep)
+ NOW=200000
+ if not keep then LiLiBanqueDB=nil; LiLiBanqueState=nil end
+ MOCK.install(); CHAT={}
+ C_ChatInfo={RegisterAddonMessagePrefix=function() return 0 end,SendAddonMessage=function() return 0 end,InChatMessagingLockdown=function() return false end,AreOutgoingAddonChatMessagesRestricted=function() return false end}
+ C_GuildInfo={GuildRoster=function() end,CanViewOfficerNote=function() return true end}
+ GetServerTime=function() return NOW end; GetTime=function() return NOW end
+ GetGuildInfo=function() return 'La Bande à Li Li' end; IsInGuild=function() return true end
+ GetUnitName=function() return 'Flo Nom' end; UnitName=function() return 'Flo','Nom' end
+ DEFAULT_CHAT_FRAME={AddMessage=function(_,m) CHAT[#CHAT+1]=m end}; SlashCmdList={}
+ SLASH_LILIBANQUE1=nil; SLASH_LILIBANQUE2=nil
+ QUERIES=0; QueryGuildBankLog=function(tab) eq(tab,9); QUERIES=QUERIES+1 end; MAX_GUILDBANK_TABS=8
+ GetNumGuildBankTabs=function() return 1 end; CanWithdrawGuildBankMoney=function() return true end
+ GetNumGuildBankMoneyTransactions=function() return 2 end
+ GetGuildBankMoneyTransaction=function(i) return 'deposit','Brenø Nom',40000,0,0,0,1 end
+ GetGuildBankMoney=function() return 80000 end
+ QueryGuildEventLog=function() end; GetNumGuildEvents=function() return 2 end
+ GetGuildEventInfo=function(i) if i==1 then return 'join','Recrue Neuve',nil,nil,0,0,0,1 else return 'invite','Flo Nom','Recrue Neuve',nil,0,0,0,2 end end
+ GetNumGuildMembers=function() return 1 end
+ GetGuildRosterInfo=function() return 'Brenø Nom','Membre',2,42,'Paladin','','Salut','reroll de Flo Nom',false,0,'PALADIN' end
+ IsInInstance=nil; InCombatLockdown=nil; issecretvalue=nil; debugprofilestop=nil
+ LiLiBanque={}
+ for _,f in ipairs({'Core','Wire','Sync','Export','Addon','UI'}) do assert(loadfile(ROOT..'/LiLiBanque/'..f..'.lua'))() end
+ return LiLiBanque.Addon,LiLiBanque.Addon.frame
+end
+-- Events go through the real OnEvent script (with its error guard), like the client.
+local function fire(event,...) LiLiBanque.Addon.frame:fire('OnEvent',event,...) end
+local function update(seconds) NOW=NOW+(seconds or 0); LiLiBanque.Addon.frame:fire('OnUpdate',1) end
+test('événements WoW réels simulés : banque, roster, recrues et UI',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); GuildBankFrame=MOCK.loadGuildBank(); GuildBankFrame:Show()
+ fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
+ eq(count(LiLiBanqueDB.ledger),2); eq(#LiLiBanqueDB.bankMoney,1)
+ fire('GUILD_ROSTER_UPDATE'); fire('GUILD_EVENT_LOG_UPDATE')
+ eq(LiLiBanqueDB.roster.members['Brenø Nom'].classFile,'PALADIN')
+ eq(LiLiBanqueDB.roster.members['Brenø Nom'].officerNote,'reroll de Flo Nom')
+ eq(count(LiLiBanqueDB.events),2)
+ for _,e in pairs(LiLiBanqueDB.events) do if e.kind=='invite' then eq(e.actor,'Flo Nom'); eq(e.player,'Recrue Neuve') end end
+ assert(LiLiBanque.UI.bankText.text:find('journal relevé',1,true),LiLiBanque.UI.bankText.text)
+ assert(chat('journal relevé, 2 nouvelles lignes (solde 8 po)'))
+ fire('GUILDBANKFRAME_CLOSED'); NOW=NOW+5; fire('GUILDBANKLOG_UPDATE'); eq(count(LiLiBanqueDB.ledger),2)
+end)
+test('chargement unique : message de version une fois, /lili et /lilibanque',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN')
+ eq(#CHAT,1); assert(CHAT[1]:find('version 1.1.1 chargée — /lili',1,true),CHAT[1])
+ eq(SLASH_LILIBANQUE1,'/lili'); eq(SLASH_LILIBANQUE2,'/lilibanque')
+ SlashCmdList.LILIBANQUE(''); assert(LiLiBanqueFrame:IsShown(),'fenêtre ouverte par /lili')
+ SlashCmdList.LILIBANQUE('  '); assert(not LiLiBanqueFrame:IsShown(),'second /lili referme')
+ SlashCmdList.LILIBANQUE('inconnu'); assert(chat('/lili diag : diagnostic'))
+ SlashCmdList.LILIBANQUE('scan'); assert(chat('ouvrez la banque de guilde'))
+end)
+test('banque chargée à la demande : cadre créé après le signal, ligne d’état attachée',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); eq(GuildBankFrame,nil)
+ -- The interaction manager signal arrives before LoadAddOn created GuildBankFrame.
+ fire('PLAYER_INTERACTION_MANAGER_FRAME_SHOW',10); assert(A.bankOpen); eq(QUERIES,1); eq(LiLiBanque.UI.bankLine,nil)
+ local bank=MOCK.loadGuildBank(); fire('ADDON_LOADED','Blizzard_GuildBankUI'); bank:Show()
+ local line=LiLiBanque.UI.bankLine; assert(line,'ligne d’état créée au chargement du cadre'); eq(line:GetParent(),bank)
+ local p,rel,rp,x,y=line:GetPoint(1); eq(p,'TOPLEFT'); eq(rel,bank); eq(rp,'BOTTOMLEFT')
+ fire('GUILDBANKFRAME_OPENED') -- duplicate signal: no second request
+ eq(QUERIES,1)
+ fire('GUILDBANKLOG_UPDATE'); assert(chat('journal relevé, 2 nouvelles lignes'))
+ assert(LiLiBanque.UI.bankText.text:find('2 nouvelles lignes',1,true))
+ -- Closing then reopening through the frame itself (no legacy event at all).
+ bank:Hide(); assert(not A.bankOpen,'OnHide referme')
+ CHAT={}; bank:Show(); assert(A.bankOpen); eq(A.openedVia,'cadre')
+ fire('GUILDBANKLOG_UPDATE'); assert(chat('journal relevé, 0 nouvelle ligne'),tostring(CHAT[1]))
+ fire('PLAYER_INTERACTION_MANAGER_FRAME_HIDE',10); assert(not A.bankOpen)
+ fire('PLAYER_INTERACTION_MANAGER_FRAME_SHOW',26); assert(not A.bankOpen,'autre interaction ignorée')
+end)
+test('nom de guilde : variantes tolérées, autre guilde annoncée et isolée',function()
+ local A=loadAddon(); GetGuildInfo=function() return 'la  bande a\194\160li li' end
+ fire('PLAYER_LOGIN'); assert(A:active(),'casse/espaces/accent tolérés'); eq(LiLiBanqueDB.guild,'La Bande à Li Li')
+ A=loadAddon(); GetGuildInfo=function() return 'La Bande à Lili' end
+ fire('PLAYER_LOGIN'); eq(A.db,nil)
+ GuildBankFrame=MOCK.loadGuildBank(); GuildBankFrame:Show(); fire('GUILDBANKFRAME_OPENED')
+ assert(chat('inactif : guilde lue « La Bande à Lili », attendue « La Bande à Li Li »'),tostring(CHAT[#CHAT]))
+ assert(LiLiBanque.UI.bankText.text:find('La Bande à Lili',1,true))
+ eq(QUERIES,0); eq(LiLiBanqueDB,nil)
+ CHAT={}; SlashCmdList.LILIBANQUE('diag')
+ assert(chat('Guilde lue : « La Bande à Lili » ; attendue « La Bande à Li Li » ; différente'))
+ assert(chat('Actif : non'))
+ GetGuildInfo=function() return nil end; CHAT={}; SlashCmdList.LILIBANQUE('diag'); assert(chat('Guilde lue : aucune'))
+end)
+test('banque sans onglet : journal vide expliqué, solde à 0 relevé',function()
+ local A=loadAddon(); GetNumGuildBankTabs=function() return 0 end
+ GetNumGuildBankMoneyTransactions=function() return 0 end; GetGuildBankMoney=function() return 0 end
+ fire('PLAYER_LOGIN'); GuildBankFrame=MOCK.loadGuildBank(); GuildBankFrame:Show(); fire('GUILDBANKFRAME_OPENED')
+ fire('GUILDBANKLOG_UPDATE'); eq(chat('journal'),nil) -- not concluded on the first empty answer
+ update(1); update(3)
+ assert(chat('journal d’or vide (aucun onglet acheté)'),tostring(CHAT[#CHAT]))
+ eq(#LiLiBanqueDB.bankMoney,1); eq(LiLiBanqueDB.bankMoney[1].copper,0); eq(#LiLiBanqueDB.gaps,0)
+ eq(LiLiBanqueDB.scannedBy['Flo Nom'],NOW)
+ -- A first purchase then appears in the log as buyTab: read normally.
+ GetNumGuildBankTabs=function() return 1 end; GetNumGuildBankMoneyTransactions=function() return 1 end
+ GetGuildBankMoneyTransaction=function() return 'buyTab','Flo Nom',1000000,0,0,0,0 end
+ CHAT={}; SlashCmdList.LILIBANQUE('scan'); fire('GUILDBANKLOG_UPDATE'); assert(chat('journal relevé, 1 nouvelle ligne'))
+end)
+test('lignes hors contrat ignorées, noms non chargés réessayés puis expliqués',function()
+ local A=loadAddon()
+ GetNumGuildBankMoneyTransactions=function() return 3 end
+ GetGuildBankMoneyTransaction=function(i) if i==2 then return 'buyRename','Flo Nom',50000,0,0,0,1 end; return 'deposit','Brenø Nom',40000+i,0,0,0,1 end
+ fire('PLAYER_LOGIN'); GuildBankFrame=MOCK.loadGuildBank(); GuildBankFrame:Show(); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
+ eq(count(LiLiBanqueDB.ledger),2); eq(A.skipped,1); assert(chat('2 nouvelles lignes'))
+ GetGuildBankMoneyTransaction=function(i) return 'deposit',nil,40000,0,0,0,1 end
+ CHAT={}; SlashCmdList.LILIBANQUE('scan')
+ fire('GUILDBANKLOG_UPDATE'); eq(chat('journal'),nil); update(2)
+ fire('GUILDBANKLOG_UPDATE'); fire('GUILDBANKLOG_UPDATE')
+ assert(chat('journal incomplet (ligne 1 : nom pas encore chargé)'),tostring(CHAT[#CHAT]))
+ eq(count(LiLiBanqueDB.ledger),2)
+ -- No answer at all: explained after 10 s.
+ GetNumGuildBankMoneyTransactions=function() return 2 end
+ CHAT={}; SlashCmdList.LILIBANQUE('scan'); update(5); update(6)
+ assert(chat('journal non reçu après 10 s'),tostring(CHAT[#CHAT]))
+end)
+test('erreur Lua capturée : message en jeu et détail dans /lili diag',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); GuildBankFrame=MOCK.loadGuildBank(); GuildBankFrame:Show(); fire('GUILDBANKFRAME_OPENED')
+ local scan=LiLiBanque.Core.scan; LiLiBanque.Core.scan=function() error('boom de test') end
+ fire('GUILDBANKLOG_UPDATE'); LiLiBanque.Core.scan=scan
+ assert(chat('erreur pendant le relevé : '),tostring(CHAT[#CHAT])); assert(chat('boom de test (/lili diag)'))
+ eq(LiLiBanqueState.lastError.where,'GUILDBANKLOG_UPDATE')
+ CHAT={}; SlashCmdList.LILIBANQUE('diag')
+ local line=chat('Dernière erreur Lua : '); assert(line and line:find('boom de test',1,true) and line:find('[GUILDBANKLOG_UPDATE]',1,true),tostring(line))
+ assert(chat('LiLiBanque 1.1.1 ; client 1.60.1 (70959), interface 16001'))
+ assert(chat('Banque ouverte : oui (signal : événement) ; GuildBankFrame : chargé, affiché ; Blizzard_GuildBankUI chargé : oui ; onglets achetés : 1'))
+ assert(chat('Notes d’officier lisibles : oui'))
+ -- Errors survive a /reload through the per-character state.
+ local state=LiLiBanqueState; loadAddon(true); LiLiBanqueState=state; fire('PLAYER_LOGIN')
+ CHAT={}; SlashCmdList.LILIBANQUE('diag'); assert(chat('boom de test'))
+ -- Errors in a click handler are captured too.
+ QueryGuildBankLog=function() error('Interface/AddOns/LiLiBanque/x.lua:1: refusé') end
+ GuildBankFrame=MOCK.loadGuildBank(); GuildBankFrame:Show(); fire('GUILDBANKFRAME_OPENED')
+ assert(chat('journal refusé par le jeu : x.lua:1: refusé'),tostring(CHAT[#CHAT]))
+end)
+test('fenêtre /lili : Échap, déplacement mémorisé, rendu des mouvements et bouton Relever',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILD_ROSTER_UPDATE')
+ GuildBankFrame=MOCK.loadGuildBank(); GuildBankFrame:Show(); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
+ SlashCmdList.LILIBANQUE('')
+ local f=LiLiBanqueFrame; assert(f:IsShown()); eq(f.template,'ButtonFrameTemplate'); eq(f.title,'La Bande à Li Li'); eq(f.portrait,false)
+ assert(f.movable and f.clamped and f.toplevel); eq(f.drag,'LeftButton')
+ local found=false; for _,n in ipairs(UISpecialFrames) do if n=='LiLiBanqueFrame' then found=true end end; assert(found,'Échap')
+ eq(f.Tabs,nil) -- one section: no tab bar
+ local UI=LiLiBanque.UI; local panel=UI.sections[1].panel
+ local r=panel.rows[1]
+ eq(r.name.text,'|cfff48cbaBrenø Nom|r'); eq(r.amount.text,'4 po'); eq(r.kind.text,'dépôt'); eq(r.ago.text,'il y a 1 h')
+ eq(panel.rows[3].name.text,'')
+ assert(panel.values.scan.text:find('2 nouvelles lignes',1,true),panel.values.scan.text)
+ assert(panel.values.money.text:find('8 po',1,true)); eq(panel.values.gaps.text,'aucun')
+ assert(panel.values.sync.text:find('file',1,true))
+ eq(panel.hint.text,'Le fichier pour le site n’est écrit qu’au /reload ou à la déconnexion.')
+ assert(UI.scanButton:IsEnabled()); fire('GUILDBANKFRAME_CLOSED'); update(1); assert(not UI.scanButton:IsEnabled(),'Relever grisé banque fermée')
+ fire('GUILDBANKFRAME_OPENED'); update(1); assert(UI.scanButton:IsEnabled()); NOW=NOW+60; UI.scanButton:Click(); eq(A.pending,true)
+ -- Withdrawal row, class colour by first name, gaps line.
+ A.db.ledger['L:x']={id='L:x',kind='repair',name='Brenø',copper=12345,ts=NOW-90000,tsPrecision=86400,source='Flo Nom',seenAt=NOW}
+ A.db.gaps[1]={at=NOW,reason='rollover'}; A:updateUI()
+ eq(panel.rows[3].amount.text,'|cffff6060-1 po 23 pa 45 pc|r'); eq(panel.rows[3].name.text,'|cfff48cbaBrenø|r'); eq(panel.rows[3].ago.text,'~il y a 1 j')
+ assert(panel.values.gaps.text:find('1|r, dernier le',1,true))
+ -- Drag then reload: position restored from the per-character state.
+ f:fire('OnDragStart'); f:ClearAllPoints(); f:SetPoint('TOPLEFT',UIParent,'TOPLEFT',123.4,-56.6); f:fire('OnDragStop')
+ eq(LiLiBanqueState.ui.point,'TOPLEFT'); eq(LiLiBanqueState.ui.x,123); eq(LiLiBanqueState.ui.y,-57)
+ f:Hide(); assert(not f:IsShown())
+ local db,state=LiLiBanqueDB,LiLiBanqueState; loadAddon(true); LiLiBanqueDB,LiLiBanqueState=db,state; fire('PLAYER_LOGIN')
+ SlashCmdList.LILIBANQUE('')
+ local p,_,rp,x,y=LiLiBanqueFrame:GetPoint(1); eq(p,'TOPLEFT'); eq(rp,'TOPLEFT'); eq(x,123); eq(y,-57)
+ local st=LiLiBanque.UI.sections[1].panel.values.scan.text; assert(st:find('2 nouvelles lignes',1,true),st) -- last scan kept across /reload
+ -- Inactive addon: the window still opens and says why.
+ loadAddon(); GetGuildInfo=function() return 'Autre' end; fire('PLAYER_LOGIN'); SlashCmdList.LILIBANQUE('')
+ assert(LiLiBanque.UI.sections[1].panel.values.scan.text:find('guilde lue « Autre »',1,true))
+ assert(not LiLiBanque.UI.exportButton:IsEnabled())
+end)
+test('sections déclarées dans une table : onglets seulement à partir de deux',function()
+ loadAddon(); fire('PLAYER_LOGIN')
+ local built,refreshed=0,0
+ LiLiBanque.UI.addSection({key='autre',title='Autre outil',build=function(p) built=built+1 end,refresh=function() refreshed=refreshed+1 end})
+ SlashCmdList.LILIBANQUE('')
+ local f=LiLiBanqueFrame; eq(#f.Tabs,2); eq(f.numTabs,2); eq(f.Tabs[2].text,'Autre outil'); eq(built,1)
+ f.Tabs[2]:Click(); eq(f.selectedTab,2); assert(LiLiBanque.UI.sections[2].panel:IsShown()); assert(not LiLiBanque.UI.sections[1].panel:IsShown())
+ assert(refreshed>0); eq(LiLiBanque.UI.header.text,'Autre outil')
+end)
+
+test('absence de droits et données secrètes : aucune erreur ni fuite',function()
+ local A=loadAddon(); C_GuildInfo.CanViewOfficerNote=function() return false end
+ QueryGuildBankLog=function() error('Permission refusée') end
+ GetNumGuildBankMoneyTransactions=function() error('Permission refusée') end
+ fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE'); fire('GUILD_ROSTER_UPDATE')
+ eq(count(LiLiBanqueDB.ledger),0); eq(LiLiBanqueDB.roster.members['Brenø Nom'].officerNote,nil)
+ local refused=chat('journal refusé par le jeu : '); assert(refused and refused:find('Permission refusée',1,true),tostring(refused)); eq(A.lastError,nil)
+ local secret={}; issecretvalue=function(v) return v==secret end
+ GetGuildRosterInfo=function() return secret end
+ fire('GUILD_ROSTER_UPDATE'); eq(count(LiLiBanqueDB.roster.members),1)
+ issecretvalue=nil
+end)
+test('reset exige confirmation ; une autre guilde ne contamine pas le relevé',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
+ A:command('reset CONFIRMER'); eq(count(A.db.ledger),2)
+ A:command('reset'); NOW=NOW+31; A:command('reset CONFIRMER'); eq(count(A.db.ledger),2)
+ LiLiBanqueState.ui={point='TOP',relPoint='TOP',x=1,y=2}
+ A:command('reset'); A:command('reset CONFIRMER'); eq(count(A.db.ledger),0); eq(LiLiBanqueState.ui.point,'TOP')
+ GetGuildInfo=function() return 'Autre guilde' end
+ fire('GUILD_EVENT_LOG_UPDATE'); fire('GUILD_ROSTER_UPDATE'); fire('GUILDBANKLOG_UPDATE'); eq(count(A.db.ledger),0)
+end)
+test('Forever restriction générale hors instance ne bloque pas une API autorisée',function()
+ local A=loadAddon(); local sends=0
+ C_ChatInfo.AreOutgoingAddonChatMessagesRestricted=function() return true end
+ C_ChatInfo.SendAddonMessage=function() sends=sends+1; return 0 end
+ IsInInstance=function() return false end; InCombatLockdown=function() return false end
+ fire('PLAYER_LOGIN'); update(0); assert(sends>0,'ne pas bloquer indéfiniment les envois hors lockdown')
+ C_ChatInfo.InChatMessagingLockdown=function() return true end
+ local before=sends; update(10); eq(sends,before)
+end)
+test('officiers vus par la synchro affichés par leur nom applicatif',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN')
+ local W=LiLiBanque.Wire; local other,so=LiLiBanque.Core.init(nil,nil,'La Bande à Li Li'); local out={}
+ local peer=LiLiBanque.Sync.new(other,so,'Magor Barbefer','La Bande à Li Li',function(m) out[#out+1]=m; return 0 end,function() return NOW end)
+ peer:hello(); for _=1,10 do peer.q:tick(NOW,false); NOW=NOW+1 end
+ for _,m in ipairs(out) do fire('CHAT_MSG_ADDON','LiLiBanque1',m,'OFFICER','Magor-Barbefer-CAMWOWEU4Realm7PvP') end
+ assert(A.sync.seen['Magor Barbefer']); SlashCmdList.LILIBANQUE('')
+ assert(LiLiBanque.UI.sections[1].panel.values.sync.text:find('vus : Magor Barbefer',1,true),LiLiBanque.UI.sections[1].panel.values.sync.text)
+end)
+test('solde relevé même lorsque le journal est refusé',function()
+ local A=loadAddon(); QueryGuildBankLog=function() error('refusé') end
+ fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED')
+ eq(#A.db.bankMoney,1); eq(A.db.bankMoney[1].copper,80000)
+end)
+test('login avec guilde non encore chargée : roster, banque ou relance périodique',function()
+ local A=loadAddon(); GetGuildInfo=function() return nil end
+ fire('PLAYER_LOGIN'); eq(A.db,nil)
+ GetGuildInfo=function() return 'La Bande à Li Li' end
+ fire('GUILD_ROSTER_UPDATE'); assert(A.db,'initialisation après cache de guilde')
+ eq(count(A.db.roster.members),1)
+ A=loadAddon(); GetGuildInfo=function() return nil end; fire('PLAYER_LOGIN')
+ GetGuildInfo=function() return 'La Bande à Li Li' end; fire('GUILDBANKFRAME_OPENED'); assert(A.db,'init à l’ouverture de la banque'); eq(QUERIES,1)
+ A=loadAddon(); GetGuildInfo=function() return nil end; fire('PLAYER_LOGIN')
+ GetGuildInfo=function() return 'La Bande à Li Li' end; update(6); assert(A.db,'relance toutes les 5 s')
+end)
+test('événement inconnu du client : les autres restent enregistrés',function()
+ MOCK.unknownEvents={GUILDBANKFRAME_OPENED=true}
+ local A=loadAddon(); MOCK.unknownEvents=nil
+ assert(A.frame.events.PLAYER_INTERACTION_MANAGER_FRAME_SHOW); assert(A.frame.events.GUILDBANKLOG_UPDATE); eq(A.frame.events.GUILDBANKFRAME_OPENED,nil)
+end)
+test('paquets H stricts et valeurs numériques hostiles rejetées',function()
+ local W=LiLiBanque.Wire; local db,s=C.init(nil,nil,'G'); local chunks={}
+ local x=LiLiBanque.Sync.new(db,s,'Flo','G',function(m) chunks[#chunks+1]=m; return 0 end,function() return 1 end)
+ x:hello(); x.q:tick(1,false)
+ local p=W.receiver():push('Flo',chunks[1],1); local f=W.unpack(p); eq(#f,6); eq(f[5],'Flo')
+ local r=row('A'); r.id='L:Flo:1:1'; r.source='Flo'; r.seenAt=0/0; assert(not C.valid('ledger',r))
+ r.seenAt=100; r.tsPrecision=0/0; assert(not C.valid('ledger',r))
+end)
+test('SavedVariables survit au rechargement et fixture respecte le contrat',function()
+ local a,s=C.init(nil,nil,'G'); C.scan(a,s,'ledger',{row('A'),row('A')},100000,'Flo')
+ local a2,s2=C.init(a,s,'G'); eq(C.scan(a2,s2,'ledger',{row('A'),row('A')},100100,'Flo'),0)
+ assert(loadfile(ROOT..'/fixtures/LiLiBanque.lua'))(); local fixture=LiLiBanqueDB
+ eq(fixture.schema,1); eq(count(fixture.roster.members),15); eq(count(fixture.ledger),30); eq(count(fixture.events),5); eq(#fixture.gaps,1)
+ for id,r in pairs(fixture.ledger) do eq(id,r.id); assert(C.valid('ledger',r)) end
+ for id,r in pairs(fixture.events) do eq(id,r.id); assert(C.valid('events',r)) end
+end)
+test('100 dépôts tournants, deux relevés et convergence différée',function()
+ local a,sa=C.init(nil,nil,'G'); local b,sb=C.init(nil,nil,'G'); local all={}
+ for i=1,100 do
+  all[#all+1]=row('Joueur '..(i%7),100000+i*3600)
+  local function snapshot()
+   local r={}; for j=math.max(1,i-19),i do r[#r+1]=C.copy(all[j]) end; return r
+  end
+  if i%4==0 or i==100 then C.scan(a,sa,'ledger',snapshot(),100000+i*3600,'Flo') end
+  if i%7==0 or i==100 then C.scan(b,sb,'ledger',snapshot(),100000+i*3600+600,'Mage') end
+  if i%13==0 or i==100 then
+   local ar,br={},{}; for _,r in pairs(a.ledger) do ar[#ar+1]=C.copy(r) end; for _,r in pairs(b.ledger) do br[#br+1]=C.copy(r) end
+   for _,r in ipairs(ar) do C.merge(b,sb,'ledger',r) end; for _,r in ipairs(br) do C.merge(a,sa,'ledger',r) end
+  end
+ end
+ eq(count(a.ledger),100); eq(count(b.ledger),100); eq(#a.gaps,0); eq(#b.gaps,0)
+end)
+test('fusion conserve le premier observateur réel plutôt que le premier nom lexical',function()
+ local a,sa=C.init(nil,nil,'G'); local b,sb=C.init(nil,nil,'G')
+ C.scan(a,sa,'ledger',{row('A')},100900,'Aofficier')
+ C.scan(b,sb,'ledger',{row('A')},100000,'Zofficier')
+ local incoming; for _,r in pairs(b.ledger) do incoming=r end
+ C.merge(a,sa,'ledger',incoming)
+ for _,r in pairs(a.ledger) do eq(r.source,'Zofficier'); eq(r.seenAt,100000) end
+end)
+
+test('export : CRC32 de référence, base64 RFC 4648 et échappement JSON',function()
+ local A=loadAddon(); local E=LiLiBanque.Export
+ eq(E.crc32('123456789'),'cbf43926'); eq(E.crc32(''),'00000000')
+ eq(E.base64(''),''); eq(E.base64('f'),'Zg=='); eq(E.base64('fo'),'Zm8='); eq(E.base64('foo'),'Zm9v'); eq(E.base64('foobar'),'Zm9vYmFy')
+ eq(E.jstring('a"b\\c\n\t\1'),'"a\\"b\\\\c\\n\\t\\u0001"')
+ eq(E.jstring('Brenø Aélia à'),'"Brenø Aélia à"')
+ eq(E.jstring('x\255y'),'"x\239\191\189y"'); eq(E.jstring('\195'),'"\239\191\189"')
+ eq(E.json({bankMoney={},gaps={},ledger={},n=1.5,b=false}),'{"b":false,"bankMoney":[],"gaps":[],"ledger":{},"n":1.5}')
+ for _,s in ipairs({'','é','Brenø'..string.rep('\0\255',300)}) do eq(E.crc32(s),PY_CRC32(s)) end
+end)
+test('export : aller-retour décodé en Python avec accents, ø et caractères spéciaux',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN')
+ assert(loadfile(ROOT..'/fixtures/LiLiBanque.lua'))()
+ local db=LiLiBanqueDB; LiLiBanqueDB=nil
+ A=loadAddon(); LiLiBanqueDB=db; fire('PLAYER_LOGIN'); assert(A.db==db)
+ db.ledger['L:x:1:1']={id='L:x:1:1',kind='deposit',name='Ça "va" \\ Øyvind\tø 🐼',copper=1,ts=1,tsPrecision=3600,source='Flo Nom',seenAt=2}
+ db.roster.members['Zoé\255']={fullName='Zoé\255',level=40,classFile='MAGE',note='ligne1\nligne2',online=true}
+ local out=LiLiBanque.Export.build(db)
+ eq(out:sub(1,7),'!LILI1!'); assert(out:find('^!LILI1![A-Za-z0-9+/]+=*![0-9a-f]+$')); eq(#out:match('!([0-9a-f]+)$'),8)
+ eq(PY_CHECK(out,db),'ok')
+ eq(LiLiBanque.Export.build(db),out) -- deterministic
+ -- Tampering is detected by the CRC.
+ local bad=out:sub(1,20)..(out:sub(21,21)=='A' and 'B' or 'A')..out:sub(22); eq(PY_CHECK(bad,db),'crc32 different')
+ -- Empty base: objects stay objects, lists stay lists.
+ local empty=LiLiBanque.Core.init(nil,nil,'La Bande à Li Li'); eq(PY_CHECK(LiLiBanque.Export.build(empty),empty),'ok')
+ assert(LiLiBanque.Export.json(LiLiBanque.Export.payload(empty)):find('"ledger":{}',1,true))
+end)
+test('export : 500 lignes et 300 soldes découpés sur plusieurs images, sans gel',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILD_ROSTER_UPDATE')
+ local db=A.db
+ for i=1,500 do local id='L:Flo Nom:'..(100000+i)..':'..i; db.ledger[id]={id=id,kind=i%9==0 and 'withdraw' or 'deposit',name='Brenø Nom '..(i%37),copper=40000+i,ts=100000+i*600,tsPrecision=3600,source='Flo Nom',seenAt=100000+i*600} end
+ for i=1,300 do db.bankMoney[i]={at=100000+i,copper=i*100} end
+ local E=LiLiBanque.Export; local job=E.job(db); local steps,worst=0,0
+ local t0=os.clock()
+ repeat local s=os.clock(); local done=job:step(); worst=math.max(worst,os.clock()-s); steps=steps+1 until done or steps>5000
+ local total=os.clock()-t0
+ assert(job.done and not job.error,tostring(job.error)); assert(steps>10,'découpé en '..steps..' étapes')
+ assert(worst<0.05,'étape la plus longue '..worst..' s'); assert(total<10,'total '..total..' s')
+ eq(PY_CHECK(job.result,db),'ok')
+ local decoded=0; for _ in job.json:gmatch('"kind"') do decoded=decoded+1 end; eq(decoded,500)
+ local money=job.json:match('"bankMoney":(%b[])'); local n=0; for _ in money:gmatch('"at"') do n=n+1 end; eq(n,30)
+ print(string.format('   export 500 lignes : %d octets, %d étapes, pire étape %.1f ms, total %.0f ms',#job.result,steps,worst*1000,total*1000))
+end)
+test('export depuis la fenêtre : zone de texte remplie, sélectionnée, en lecture seule',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); GuildBankFrame=MOCK.loadGuildBank(); GuildBankFrame:Show(); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
+ SlashCmdList.LILIBANQUE(''); local UI=LiLiBanque.UI
+ eq(UI.exportButton.text,'Exporter'); UI.exportButton:Click()
+ local p=UI.exportPanel; assert(p:IsShown()); assert(not UI.sections[1].panel:IsShown()); eq(p.hint.text,'Préparation de l’export…')
+ eq(UI.exportButton.text,'Retour'); assert(not UI.scanButton:IsShown())
+ local frames=0; while UI.job and frames<1000 do p:fire('OnUpdate',0.016); frames=frames+1 end
+ assert(frames>=1); local box=p.box
+ assert(box.text:find('^!LILI1!')); eq(PY_CHECK(box.text,A.db),'ok')
+ assert(box.focus and box.highlighted,'texte sélectionné et focus'); eq(box.cursor,0)
+ eq(p.hint.text,'Ctrl+C, puis collez-le sur le site de la guilde.')
+ local text=box.text; box.highlighted=false; box:type('abc'); eq(box.text,text); assert(box.highlighted)
+ box:fire('OnEscapePressed'); assert(not LiLiBanqueFrame:IsShown(),'Échap dans la zone ferme la fenêtre')
+ assert(not UI.exporting and box.text=='')
+ SlashCmdList.LILIBANQUE('export'); assert(LiLiBanqueFrame:IsShown() and UI.exporting)
+ UI.exportButton:Click(); assert(not UI.exporting); assert(UI.sections[1].panel:IsShown())
+end)
+for _,t in ipairs(tests) do
+ local ok,e=pcall(t[2])
+ -- No test may leave an unexpected captured Lua error behind (they would be silent in game).
+ local A=LiLiBanque and LiLiBanque.Addon
+ if ok and A and A.lastError and not t[1]:find('erreur',1,true) then ok,e=false,'erreur capturée inattendue : '..A.lastError.msg end
+ if not ok then error('FAIL '..t[1]..': '..tostring(e)) end; passed=passed+1; print('ok - '..t[1]) end
+print('PASS '..passed..' tests ('.._VERSION..')')

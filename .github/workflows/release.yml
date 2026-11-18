@@ -1,0 +1,50 @@
+name: Vérification et release WowUp
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Installer Lua 5.1 embarqué pour les tests
+        run: python -m pip install -r requirements-test.txt
+      - name: Tests Lua + vérification distribution
+        run: |
+          python tests/run.py
+          python tests/package_test.py
+      - name: Assembler le zip Forever et release.json
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          if [ "$IS_TAG" = true ]; then
+            python scripts/package.py --tag "$RELEASE_TAG"
+          else
+            python scripts/package.py
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LiLiBanque-forever
+          path: |
+            dist/*.zip
+            dist/release.json
+      - name: Publier les assets sur le tag (pas les archives source GitHub)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "LiLiBanque $RELEASE_TAG" --generate-notes --latest
+          fi
+          gh release upload "$RELEASE_TAG" dist/*.zip dist/release.json --clobber
