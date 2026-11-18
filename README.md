@@ -14,6 +14,7 @@ Ou à la main : extraire le zip de la dernière release dans `_forever_\Interfac
 - `/lili scan` : relance un relevé
 - `/lili export` : copie le relevé
 - `/lili diag` : diagnostic
+- `/lili rappel on|off` : active ou désactive le rappel de passage à la banque pour ce personnage
 - `/lili reset` : efface les données locales
 
 ## Licence

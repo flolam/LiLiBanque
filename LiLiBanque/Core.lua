@@ -1,7 +1,7 @@
 -- LiLiBanque: pure data layer, Lua 5.1. No WoW globals or executable deserialization.
 LiLiBanque = LiLiBanque or {}
 local C = {}; LiLiBanque.Core = C
-C.VERSION = '1.1.1'
+C.VERSION = '1.2.0'
 local moneyKinds = {deposit=true,withdraw=true,repair=true,withdrawForTab=true,buyTab=true,depositSummary=true}
 local eventKinds = {join=true,leave=true,remove=true,promote=true,demote=true,invite=true}
 function C.copy(t) local o={}; for k,v in pairs(t) do o[k]=v end; return o end
@@ -95,8 +95,17 @@ function C.scan(db,s,col,rows,now,source)
         end
         if overlap>0 then break end
     end
+    local gap
     if #prev>0 and #rows>0 and overlap==0 and col=='ledger' then
+        local from=s.localLedgerAt or s.lastScan and s.lastScan.ok and s.lastScan.at
+        if not from then
+            for _,id in ipairs(prev) do
+                local r=db.ledger[resolve(aliases,id)]
+                if r and (not from or r.seenAt>from) then from=r.seenAt end
+            end
+        end
         db.gaps[#db.gaps+1]={at=now,reason='rollover'}
+        gap={at=now,from=from}; s.lastGap=gap
     end
     if overlap>0 then
         for i=1,overlap do
@@ -116,7 +125,21 @@ function C.scan(db,s,col,rows,now,source)
     -- An empty/denied response must never erase the previous continuity marker.
     if #nextMarkers>0 then markers[source]=nextMarkers end
     db.scannedBy[source]=now
-    return added
+    if col=='ledger' and #rows>0 then s.localLedgerAt=now end
+    return added,gap
+end
+-- Scan time is internal, never part of the exported DB. A roster timestamp is not a bank scan.
+function C.validScanAt(at,now)
+    return type(at)=='number' and at==at and at>0 and at<=4102444800
+        and at==math.floor(at) and at<=now+300
+end
+function C.bankScanTime(db,s,now)
+    local at=0
+    local function take(v) if C.validScanAt(v,now) and v>at then at=v end end
+    take(s.bankScanAt); take(s.localLedgerAt)
+    if s.lastScan and s.lastScan.ok then take(s.lastScan.at) end
+    for _,r in pairs(db.ledger) do take(r.seenAt) end
+    if at>0 then s.bankScanAt=at; return at end
 end
 function C.money(db,now,copper)
     if type(copper)~='number' or copper<0 or copper~=math.floor(copper) then return end

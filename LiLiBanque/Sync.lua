@@ -1,7 +1,8 @@
 local C,W=LiLiBanque.Core,LiLiBanque.Wire
 local S={}; LiLiBanque.Sync=S
 S.PREFIX='LiLiBanque1'
-function S.new(db,state,name,guild,send,clock)
+function S.new(db,state,name,guild,send,clock,wallTime)
+    wallTime=wallTime or clock
     local self={db=db,state=state,name=name,guild=guild,q=W.queue(send),rx=W.receiver(),clock=clock,serial=0,peers={},seen={},seenCount=0,transferred=0,nextHello=0}
     function self:packet(op,target,col,values)
         local fields={op,self.guild,target or '',col or '',self.name}
@@ -12,8 +13,13 @@ function S.new(db,state,name,guild,send,clock)
         if self.q:size()+#chunks>2048 then self.q.overflow=true; return end
         for _,m in ipairs(chunks) do self.q:add(m) end
     end
+    function self:bankScan(target)
+        local at=C.bankScanTime(self.db,self.state,wallTime())
+        if at then self:packet('B',target,'bankScan',{at}) end
+    end
     function self:hello(target)
         for _,col in ipairs({'ledger','events'}) do local digest=W.digest(self.db[col]); self:packet('H',target,col,{digest}) end
+        self:bankScan(target)
         self.nextHello=self.clock()+120
     end
     function self:inventory(col,target)
@@ -49,7 +55,17 @@ function S.new(db,state,name,guild,send,clock)
             self.seen[peerName]=now
         end
         table.remove(f,5) -- remaining fields have the stable v1 operation layout below
-        local op,col=f[1],f[4]; if col~='ledger' and col~='events' then return end
+        local op,col=f[1],f[4]
+        -- 1.1.x rejects this new column before interpreting its unknown operation.
+        if op=='B' and col=='bankScan' then
+            if #payload>512 or #f~=5 or #f[5]>10 or not f[5]:match('^%d+$') then return end
+            local at=tonumber(f[5]); local wall=wallTime()
+            if not C.validScanAt(at,wall) then return end
+            local previous=C.bankScanTime(self.db,self.state,wall) or 0
+            if at>previous then self.state.bankScanAt=at end
+            return
+        end
+        if col~='ledger' and col~='events' then return end
         if op=='H' then
             local digest=W.digest(self.db[col])
             if f[5]~=digest and (not peer.hello[col] or now-peer.hello[col]>=30) then
@@ -71,7 +87,12 @@ function S.new(db,state,name,guild,send,clock)
             if col=='ledger' then r={id=f[5],kind=f[6],name=f[7],copper=tonumber(f[8]),ts=tonumber(f[9]),tsPrecision=tonumber(f[10]),source=f[11],seenAt=tonumber(f[12])}
             else r={id=f[5],kind=f[6],player=f[7],actor=f[8],rank=f[9]~='' and f[9] or nil,ts=tonumber(f[10]),tsPrecision=tonumber(f[11])} end
             local id=C.merge(self.db,self.state,col,r)
-            if id then self.transferred=self.transferred+1; self.lastSync=now end
+            if id then
+                self.transferred=self.transferred+1; self.lastSync=now
+                if col=='ledger' and C.validScanAt(r.seenAt,wallTime()) then
+                    self.state.bankScanAt=math.max(C.bankScanTime(self.db,self.state,wallTime()) or 0,r.seenAt)
+                end
+            end
         end
     end
     function self:tick(now,locked)

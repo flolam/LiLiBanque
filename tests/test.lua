@@ -7,24 +7,24 @@ local C
 local function row(name,ts) return {kind='deposit',name=name,copper=40000,ts=ts or 100000,tsPrecision=3600} end
 test('premier scan et chevauchement sans doublon',function()
  C=loadCore(); local db,s=C.init(nil,nil,'La Bande à Li Li')
- eq(C.scan(db,s,'ledger',{row('A'),row('B')},100010,'Flo'),2)
- eq(C.scan(db,s,'ledger',{row('A'),row('B'),row('C')},100020,'Flo'),1)
- eq(C.scan(db,s,'ledger',{row('B'),row('C')},100030,'Flo'),0)
+ eq(C.scan(db,s,'ledger',{row('A'),row('B')},100010,'Elvor'),2)
+ eq(C.scan(db,s,'ledger',{row('A'),row('B'),row('C')},100020,'Elvor'),1)
+ eq(C.scan(db,s,'ledger',{row('B'),row('C')},100030,'Elvor'),0)
  eq(count(db.ledger),3); eq(#db.gaps,0)
 end)
 test('rotation signale un trou sans multiplier les alertes',function()
- local db,s=C.init(nil,nil,'G'); C.scan(db,s,'ledger',{row('A'),row('B')},100000,'Flo')
- eq(C.scan(db,s,'ledger',{row('C'),row('D')},110000,'Flo'),2)
+ local db,s=C.init(nil,nil,'G'); C.scan(db,s,'ledger',{row('A'),row('B')},100000,'Elvor')
+ eq(C.scan(db,s,'ledger',{row('C'),row('D')},110000,'Elvor'),2)
  eq(#db.gaps,1); eq(db.gaps[1].reason,'rollover')
- C.scan(db,s,'ledger',{row('C'),row('D')},110010,'Flo'); eq(#db.gaps,1)
+ C.scan(db,s,'ledger',{row('C'),row('D')},110010,'Elvor'); eq(#db.gaps,1)
 end)
 test('occurrences identiques et fusion inter-officiers décalée',function()
  local a,sa=C.init(nil,nil,'G'); local b,sb=C.init(nil,nil,'G')
- C.scan(a,sa,'ledger',{row('A'),row('A')},100000,'Flo')
+ C.scan(a,sa,'ledger',{row('A'),row('A')},100000,'Elvor')
  C.scan(b,sb,'ledger',{row('A',100900),row('A',100900)},100900,'Mage')
  for _,r in pairs(b.ledger) do C.merge(a,sa,'ledger',r) end
  eq(count(a.ledger),2)
- C.scan(a,sa,'ledger',{row('A'),row('A'),row('A')},100950,'Flo'); eq(count(a.ledger),3)
+ C.scan(a,sa,'ledger',{row('A'),row('A'),row('A')},100950,'Elvor'); eq(count(a.ledger),3)
  for _,r in pairs(b.ledger) do C.merge(a,sa,'ledger',r) end; eq(count(a.ledger),3)
  for _,r in pairs(a.ledger) do C.merge(b,sb,'ledger',r) end; eq(count(b.ledger),3)
  for id in pairs(a.ledger) do assert(b.ledger[id], 'identifiants convergents') end
@@ -35,7 +35,7 @@ test('horodatage et solde dédupliqué',function()
 end)
 test('transport découpe et réassemble sans exécuter de Lua',function()
  assert(loadfile(ROOT..'/LiLiBanque/Wire.lua'))(); local W=LiLiBanque.Wire
- local payload=W.pack({'D','ledger','L:Flo:1:1','deposit','Brenø Nom',40000,100000,3600,'Flo',100100,string.rep('é;%',300)})
+ local payload=W.pack({'D','ledger','L:Elvor:1:1','deposit','Brenø Nom',40000,100000,3600,'Elvor',100100,string.rep('é;%',300)})
  local chunks=W.chunks(payload,'abc'); assert(#chunks>1)
  local rx=W.receiver(); local out
  for i=#chunks,1,-1 do assert(#chunks[i]<255); out=rx:push('Mage',chunks[i],1) or out end
@@ -53,20 +53,20 @@ end)
 test('handshake ne transporte que le manquant entre deux officiers',function()
  assert(loadfile(ROOT..'/LiLiBanque/Sync.lua'))(); local S=LiLiBanque.Sync
  local a,sa=C.init(nil,nil,'G'); local b,sb=C.init(nil,nil,'G')
- C.scan(a,sa,'ledger',{row('A'),row('A')},100000,'Flo')
+ C.scan(a,sa,'ledger',{row('A'),row('A')},100000,'Elvor')
  local now=0; local aq,bq={},{}
- local x=S.new(a,sa,'Flo','G',function(m) aq[#aq+1]=m; return 0 end,function() return now end)
+ local x=S.new(a,sa,'Elvor','G',function(m) aq[#aq+1]=m; return 0 end,function() return now end)
  local y=S.new(b,sb,'Mage','G',function(m) bq[#bq+1]=m; return 0 end,function() return now end)
  x:hello(); y:hello()
  for n=1,1000 do
   now=n; x:tick(now,false); y:tick(now,false)
-  while #aq>0 do y:receive(table.remove(aq,1),'OFFICER','Flo-Surname-CAMWOWEU4Realm7PvP') end
+  while #aq>0 do y:receive(table.remove(aq,1),'OFFICER','Elvor-Surname-CAMWOWEU4Realm7PvP') end
   while #bq>0 do x:receive(table.remove(bq,1),'OFFICER','Mage') end
  end
  eq(count(b.ledger),2); eq(x.transferred,0); eq(y.transferred,2)
  x:hello(); y:hello()
  for n=1001,1100 do now=n; x:tick(now,false); y:tick(now,false)
-  while #aq>0 do y:receive(table.remove(aq,1),'OFFICER','Flo-Surname-CAMWOWEU4Realm7PvP') end
+  while #aq>0 do y:receive(table.remove(aq,1),'OFFICER','Elvor-Surname-CAMWOWEU4Realm7PvP') end
   while #bq>0 do x:receive(table.remove(bq,1),'OFFICER','Mage') end
  end
  eq(y.transferred,2)
@@ -79,12 +79,13 @@ local function chat(pattern) for i=#CHAT,1,-1 do if CHAT[i]:find(pattern,1,true)
 local function loadAddon(keep)
  NOW=200000
  if not keep then LiLiBanqueDB=nil; LiLiBanqueState=nil end
- MOCK.install(); CHAT={}
+ MOCK.install(); CHAT={}; SOUNDS={}
+ SOUNDKIT={IG_MAINMENU_OPTION_CHECKBOX_ON=856}; PlaySound=function(id) SOUNDS[#SOUNDS+1]=id end
  C_ChatInfo={RegisterAddonMessagePrefix=function() return 0 end,SendAddonMessage=function() return 0 end,InChatMessagingLockdown=function() return false end,AreOutgoingAddonChatMessagesRestricted=function() return false end}
  C_GuildInfo={GuildRoster=function() end,CanViewOfficerNote=function() return true end}
  GetServerTime=function() return NOW end; GetTime=function() return NOW end
  GetGuildInfo=function() return 'La Bande à Li Li' end; IsInGuild=function() return true end
- GetUnitName=function() return 'Flo Nom' end; UnitName=function() return 'Flo','Nom' end
+ GetUnitName=function() return 'Elvor Valbrume' end; UnitName=function() return 'Elvor','Nom' end
  DEFAULT_CHAT_FRAME={AddMessage=function(_,m) CHAT[#CHAT+1]=m end}; SlashCmdList={}
  SLASH_LILIBANQUE1=nil; SLASH_LILIBANQUE2=nil
  QUERIES=0; QueryGuildBankLog=function(tab) eq(tab,9); QUERIES=QUERIES+1 end; MAX_GUILDBANK_TABS=8
@@ -93,9 +94,9 @@ local function loadAddon(keep)
  GetGuildBankMoneyTransaction=function(i) return 'deposit','Brenø Nom',40000,0,0,0,1 end
  GetGuildBankMoney=function() return 80000 end
  QueryGuildEventLog=function() end; GetNumGuildEvents=function() return 2 end
- GetGuildEventInfo=function(i) if i==1 then return 'join','Recrue Neuve',nil,nil,0,0,0,1 else return 'invite','Flo Nom','Recrue Neuve',nil,0,0,0,2 end end
+ GetGuildEventInfo=function(i) if i==1 then return 'join','Recrue Neuve',nil,nil,0,0,0,1 else return 'invite','Elvor Valbrume','Recrue Neuve',nil,0,0,0,2 end end
  GetNumGuildMembers=function() return 1 end
- GetGuildRosterInfo=function() return 'Brenø Nom','Membre',2,42,'Paladin','','Salut','reroll de Flo Nom',false,0,'PALADIN' end
+ GetGuildRosterInfo=function() return 'Brenø Nom','Membre',2,42,'Paladin','','Salut','reroll de Elvor Valbrume',false,0,'PALADIN' end
  IsInInstance=nil; InCombatLockdown=nil; issecretvalue=nil; debugprofilestop=nil
  LiLiBanque={}
  for _,f in ipairs({'Core','Wire','Sync','Export','Addon','UI'}) do assert(loadfile(ROOT..'/LiLiBanque/'..f..'.lua'))() end
@@ -110,16 +111,16 @@ test('événements WoW réels simulés : banque, roster, recrues et UI',function
  eq(count(LiLiBanqueDB.ledger),2); eq(#LiLiBanqueDB.bankMoney,1)
  fire('GUILD_ROSTER_UPDATE'); fire('GUILD_EVENT_LOG_UPDATE')
  eq(LiLiBanqueDB.roster.members['Brenø Nom'].classFile,'PALADIN')
- eq(LiLiBanqueDB.roster.members['Brenø Nom'].officerNote,'reroll de Flo Nom')
+ eq(LiLiBanqueDB.roster.members['Brenø Nom'].officerNote,'reroll de Elvor Valbrume')
  eq(count(LiLiBanqueDB.events),2)
- for _,e in pairs(LiLiBanqueDB.events) do if e.kind=='invite' then eq(e.actor,'Flo Nom'); eq(e.player,'Recrue Neuve') end end
+ for _,e in pairs(LiLiBanqueDB.events) do if e.kind=='invite' then eq(e.actor,'Elvor Valbrume'); eq(e.player,'Recrue Neuve') end end
  assert(LiLiBanque.UI.bankText.text:find('journal relevé',1,true),LiLiBanque.UI.bankText.text)
  assert(chat('journal relevé, 2 nouvelles lignes (solde 8 po)'))
  fire('GUILDBANKFRAME_CLOSED'); NOW=NOW+5; fire('GUILDBANKLOG_UPDATE'); eq(count(LiLiBanqueDB.ledger),2)
 end)
 test('chargement unique : message de version une fois, /lili et /lilibanque',function()
  local A=loadAddon(); fire('PLAYER_LOGIN')
- eq(#CHAT,1); assert(CHAT[1]:find('version 1.1.1 chargée — /lili',1,true),CHAT[1])
+ eq(#CHAT,1); assert(CHAT[1]:find('version 1.2.0 chargée — /lili',1,true),CHAT[1])
  eq(SLASH_LILIBANQUE1,'/lili'); eq(SLASH_LILIBANQUE2,'/lilibanque')
  SlashCmdList.LILIBANQUE(''); assert(LiLiBanqueFrame:IsShown(),'fenêtre ouverte par /lili')
  SlashCmdList.LILIBANQUE('  '); assert(not LiLiBanqueFrame:IsShown(),'second /lili referme')
@@ -166,16 +167,16 @@ test('banque sans onglet : journal vide expliqué, solde à 0 relevé',function(
  update(1); update(3)
  assert(chat('journal d’or vide (aucun onglet acheté)'),tostring(CHAT[#CHAT]))
  eq(#LiLiBanqueDB.bankMoney,1); eq(LiLiBanqueDB.bankMoney[1].copper,0); eq(#LiLiBanqueDB.gaps,0)
- eq(LiLiBanqueDB.scannedBy['Flo Nom'],NOW)
+ eq(LiLiBanqueDB.scannedBy['Elvor Valbrume'],NOW)
  -- A first purchase then appears in the log as buyTab: read normally.
  GetNumGuildBankTabs=function() return 1 end; GetNumGuildBankMoneyTransactions=function() return 1 end
- GetGuildBankMoneyTransaction=function() return 'buyTab','Flo Nom',1000000,0,0,0,0 end
+ GetGuildBankMoneyTransaction=function() return 'buyTab','Elvor Valbrume',1000000,0,0,0,0 end
  CHAT={}; SlashCmdList.LILIBANQUE('scan'); fire('GUILDBANKLOG_UPDATE'); assert(chat('journal relevé, 1 nouvelle ligne'))
 end)
 test('lignes hors contrat ignorées, noms non chargés réessayés puis expliqués',function()
  local A=loadAddon()
  GetNumGuildBankMoneyTransactions=function() return 3 end
- GetGuildBankMoneyTransaction=function(i) if i==2 then return 'buyRename','Flo Nom',50000,0,0,0,1 end; return 'deposit','Brenø Nom',40000+i,0,0,0,1 end
+ GetGuildBankMoneyTransaction=function(i) if i==2 then return 'buyRename','Elvor Valbrume',50000,0,0,0,1 end; return 'deposit','Brenø Nom',40000+i,0,0,0,1 end
  fire('PLAYER_LOGIN'); GuildBankFrame=MOCK.loadGuildBank(); GuildBankFrame:Show(); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
  eq(count(LiLiBanqueDB.ledger),2); eq(A.skipped,1); assert(chat('2 nouvelles lignes'))
  GetGuildBankMoneyTransaction=function(i) return 'deposit',nil,40000,0,0,0,1 end
@@ -197,7 +198,7 @@ test('erreur Lua capturée : message en jeu et détail dans /lili diag',function
  eq(LiLiBanqueState.lastError.where,'GUILDBANKLOG_UPDATE')
  CHAT={}; SlashCmdList.LILIBANQUE('diag')
  local line=chat('Dernière erreur Lua : '); assert(line and line:find('boom de test',1,true) and line:find('[GUILDBANKLOG_UPDATE]',1,true),tostring(line))
- assert(chat('LiLiBanque 1.1.1 ; client 1.60.1 (70959), interface 16001'))
+ assert(chat('LiLiBanque 1.2.0 ; client 1.60.1 (70959), interface 16001'))
  assert(chat('Banque ouverte : oui (signal : événement) ; GuildBankFrame : chargé, affiché ; Blizzard_GuildBankUI chargé : oui ; onglets achetés : 1'))
  assert(chat('Notes d’officier lisibles : oui'))
  -- Errors survive a /reload through the per-character state.
@@ -227,7 +228,7 @@ test('fenêtre /lili : Échap, déplacement mémorisé, rendu des mouvements et 
  assert(UI.scanButton:IsEnabled()); fire('GUILDBANKFRAME_CLOSED'); update(1); assert(not UI.scanButton:IsEnabled(),'Relever grisé banque fermée')
  fire('GUILDBANKFRAME_OPENED'); update(1); assert(UI.scanButton:IsEnabled()); NOW=NOW+60; UI.scanButton:Click(); eq(A.pending,true)
  -- Withdrawal row, class colour by first name, gaps line.
- A.db.ledger['L:x']={id='L:x',kind='repair',name='Brenø',copper=12345,ts=NOW-90000,tsPrecision=86400,source='Flo Nom',seenAt=NOW}
+ A.db.ledger['L:x']={id='L:x',kind='repair',name='Brenø',copper=12345,ts=NOW-90000,tsPrecision=86400,source='Elvor Valbrume',seenAt=NOW}
  A.db.gaps[1]={at=NOW,reason='rollover'}; A:updateUI()
  eq(panel.rows[3].amount.text,'|cffff6060-1 po 23 pa 45 pc|r'); eq(panel.rows[3].name.text,'|cfff48cbaBrenø|r'); eq(panel.rows[3].ago.text,'~il y a 1 j')
  assert(panel.values.gaps.text:find('1|r, dernier le',1,true))
@@ -316,15 +317,15 @@ test('événement inconnu du client : les autres restent enregistrés',function(
 end)
 test('paquets H stricts et valeurs numériques hostiles rejetées',function()
  local W=LiLiBanque.Wire; local db,s=C.init(nil,nil,'G'); local chunks={}
- local x=LiLiBanque.Sync.new(db,s,'Flo','G',function(m) chunks[#chunks+1]=m; return 0 end,function() return 1 end)
+ local x=LiLiBanque.Sync.new(db,s,'Elvor','G',function(m) chunks[#chunks+1]=m; return 0 end,function() return 1 end)
  x:hello(); x.q:tick(1,false)
- local p=W.receiver():push('Flo',chunks[1],1); local f=W.unpack(p); eq(#f,6); eq(f[5],'Flo')
- local r=row('A'); r.id='L:Flo:1:1'; r.source='Flo'; r.seenAt=0/0; assert(not C.valid('ledger',r))
+ local p=W.receiver():push('Elvor',chunks[1],1); local f=W.unpack(p); eq(#f,6); eq(f[5],'Elvor')
+ local r=row('A'); r.id='L:Elvor:1:1'; r.source='Elvor'; r.seenAt=0/0; assert(not C.valid('ledger',r))
  r.seenAt=100; r.tsPrecision=0/0; assert(not C.valid('ledger',r))
 end)
 test('SavedVariables survit au rechargement et fixture respecte le contrat',function()
- local a,s=C.init(nil,nil,'G'); C.scan(a,s,'ledger',{row('A'),row('A')},100000,'Flo')
- local a2,s2=C.init(a,s,'G'); eq(C.scan(a2,s2,'ledger',{row('A'),row('A')},100100,'Flo'),0)
+ local a,s=C.init(nil,nil,'G'); C.scan(a,s,'ledger',{row('A'),row('A')},100000,'Elvor')
+ local a2,s2=C.init(a,s,'G'); eq(C.scan(a2,s2,'ledger',{row('A'),row('A')},100100,'Elvor'),0)
  assert(loadfile(ROOT..'/fixtures/LiLiBanque.lua'))(); local fixture=LiLiBanqueDB
  eq(fixture.schema,1); eq(count(fixture.roster.members),15); eq(count(fixture.ledger),30); eq(count(fixture.events),5); eq(#fixture.gaps,1)
  for id,r in pairs(fixture.ledger) do eq(id,r.id); assert(C.valid('ledger',r)) end
@@ -337,7 +338,7 @@ test('100 dépôts tournants, deux relevés et convergence différée',function(
   local function snapshot()
    local r={}; for j=math.max(1,i-19),i do r[#r+1]=C.copy(all[j]) end; return r
   end
-  if i%4==0 or i==100 then C.scan(a,sa,'ledger',snapshot(),100000+i*3600,'Flo') end
+  if i%4==0 or i==100 then C.scan(a,sa,'ledger',snapshot(),100000+i*3600,'Elvor') end
   if i%7==0 or i==100 then C.scan(b,sb,'ledger',snapshot(),100000+i*3600+600,'Mage') end
   if i%13==0 or i==100 then
    local ar,br={},{}; for _,r in pairs(a.ledger) do ar[#ar+1]=C.copy(r) end; for _,r in pairs(b.ledger) do br[#br+1]=C.copy(r) end
@@ -370,7 +371,7 @@ test('export : aller-retour décodé en Python avec accents, ø et caractères s
  assert(loadfile(ROOT..'/fixtures/LiLiBanque.lua'))()
  local db=LiLiBanqueDB; LiLiBanqueDB=nil
  A=loadAddon(); LiLiBanqueDB=db; fire('PLAYER_LOGIN'); assert(A.db==db)
- db.ledger['L:x:1:1']={id='L:x:1:1',kind='deposit',name='Ça "va" \\ Øyvind\tø 🐼',copper=1,ts=1,tsPrecision=3600,source='Flo Nom',seenAt=2}
+ db.ledger['L:x:1:1']={id='L:x:1:1',kind='deposit',name='Ça "va" \\ Øyvind\tø 🐼',copper=1,ts=1,tsPrecision=3600,source='Elvor Valbrume',seenAt=2}
  db.roster.members['Zoé\255']={fullName='Zoé\255',level=40,classFile='MAGE',note='ligne1\nligne2',online=true}
  local out=LiLiBanque.Export.build(db)
  eq(out:sub(1,7),'!LILI1!'); assert(out:find('^!LILI1![A-Za-z0-9+/]+=*![0-9a-f]+$')); eq(#out:match('!([0-9a-f]+)$'),8)
@@ -385,7 +386,7 @@ end)
 test('export : 500 lignes et 300 soldes découpés sur plusieurs images, sans gel',function()
  local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILD_ROSTER_UPDATE')
  local db=A.db
- for i=1,500 do local id='L:Flo Nom:'..(100000+i)..':'..i; db.ledger[id]={id=id,kind=i%9==0 and 'withdraw' or 'deposit',name='Brenø Nom '..(i%37),copper=40000+i,ts=100000+i*600,tsPrecision=3600,source='Flo Nom',seenAt=100000+i*600} end
+ for i=1,500 do local id='L:Elvor Valbrume:'..(100000+i)..':'..i; db.ledger[id]={id=id,kind=i%9==0 and 'withdraw' or 'deposit',name='Brenø Nom '..(i%37),copper=40000+i,ts=100000+i*600,tsPrecision=3600,source='Elvor Valbrume',seenAt=100000+i*600} end
  for i=1,300 do db.bankMoney[i]={at=100000+i,copper=i*100} end
  local E=LiLiBanque.Export; local job=E.job(db); local steps,worst=0,0
  local t0=os.clock()
@@ -414,6 +415,163 @@ test('export depuis la fenêtre : zone de texte remplie, sélectionnée, en lect
  assert(not UI.exporting and box.text=='')
  SlashCmdList.LILIBANQUE('export'); assert(LiLiBanqueFrame:IsShown() and UI.exporting)
  UI.exportButton:Click(); assert(not UI.exporting); assert(UI.sections[1].panel:IsShown())
+end)
+test('trou visible : rouge, son natif, intervalle local, état et diagnostic persistants',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
+ eq(chat('dépôts ont pu être perdus'),nil)
+ local before=NOW; NOW=NOW+600; fire('GUILD_ROSTER_UPDATE') -- never the previous bank scan
+ GetGuildBankMoneyTransaction=function() return 'deposit','Lunor Brumebleue',60000,0,0,0,0 end
+ CHAT={}; NOW=NOW+600; A:scanNow(); fire('GUILDBANKLOG_UPDATE')
+ eq(#A.db.gaps,1); eq(count(A.db.gaps[1]),2) -- server contract unchanged
+ local alert=assert(chat('dépôts ont pu être perdus'),'rotation annoncée')
+ assert(alert:find('|cffff6060',1,true)); assert(alert:find(date('%d/%m %H:%M',before),1,true))
+ assert(alert:find(date('%d/%m %H:%M',NOW),1,true)); assert(alert:find('vérifiez sur le site',1,true))
+ eq(#SOUNDS,1); eq(SOUNDS[1],856)
+ SlashCmdList.LILIBANQUE(''); assert(LiLiBanque.UI.sections[1].panel.values.gaps.text:find('dépôts ont pu être perdus',1,true))
+ CHAT={}; A:scanNow(); fire('GUILDBANKLOG_UPDATE'); eq(chat('dépôts ont pu être perdus'),nil); eq(#SOUNDS,1)
+ loadAddon(true); fire('PLAYER_LOGIN'); CHAT={}; SlashCmdList.LILIBANQUE('diag')
+ assert(chat('Dernier trou : ')); assert(chat(date('%d/%m %H:%M',before)))
+end)
+test('rappel au login : banque connue seulement, dernier journal et pas roster',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILD_ROSTER_UPDATE')
+ eq(chat('Banque pas relevée'),nil)
+ local db=A.db
+ db.bankMoney={{at=100000,copper=0}}
+ LiLiBanqueState.lastScan={at=100000,ok=true,lines=2,newLines=0}
+ db.scannedBy['Elvor Valbrume']=200000 -- not proof of a bank scan
+ A=loadAddon(true); fire('PLAYER_LOGIN')
+ assert(chat('Banque pas relevée depuis 27 h'),'rappel au login avec banque connue et vieux journal')
+ eq(LiLiBanqueState.lastReminderAt,NOW)
+ loadAddon(); fire('PLAYER_LOGIN'); eq(chat('Banque pas relevée'),nil)
+end)
+test('rappel périodique : seuils locaux mercredi/jeudi, autres jours et bornes',function()
+ for day=0,6 do
+  for _,delta in ipairs({-1,0,1}) do
+   local A=loadAddon(); fire('PLAYER_LOGIN')
+   date=function(fmt,ts) if fmt=='%w' then return tostring(day) end; return os.date(fmt,ts) end
+   local threshold=(day==3 or day==4) and 14400 or 43200
+   A.db.bankMoney={{at=NOW-100000,copper=0}}; A.state.bankScanAt=NOW-threshold-delta
+   CHAT={}; update(0)
+   eq(chat('Banque pas relevée')~=nil,delta==1)
+  end
+ end
+end)
+test('rappel sans spam : deux heures, rechargement, combat, instance et préférence par perso',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); A.db.bankMoney={{at=100,copper=0}}; A.state.bankScanAt=100
+ local blocked=true
+ InCombatLockdown=function() return blocked end; IsInInstance=function() return false end
+ CHAT={}; update(0); eq(#CHAT,0); eq(A.state.lastReminderAt,nil)
+ blocked=false; IsInInstance=function() return true end; update(0); eq(#CHAT,0)
+ IsInInstance=function() return false end; update(0); eq(#CHAT,1)
+ CHAT={}; update(7199); eq(#CHAT,0); update(1); eq(#CHAT,1)
+ local at=NOW; loadAddon(true); NOW=at; fire('PLAYER_LOGIN'); eq(chat('Banque pas relevée'),nil)
+ A=LiLiBanque.Addon; SlashCmdList.LILIBANQUE('rappel off'); eq(A.state.reminderEnabled,false)
+ CHAT={}; update(7200); eq(chat('Banque pas relevée'),nil)
+ at=NOW; loadAddon(true); NOW=at; fire('PLAYER_LOGIN'); eq(LiLiBanqueState.reminderEnabled,false)
+ CHAT={}; update(7200); eq(chat('Banque pas relevée'),nil)
+ SlashCmdList.LILIBANQUE('rappel on'); eq(LiLiBanqueState.reminderEnabled,true)
+ CHAT={}; update(0); eq(#CHAT,1); assert(chat('Banque pas relevée'))
+end)
+test('synchro partage chaque relevé réussi, même sans nouvelle ligne, et borne seenAt',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
+ local W,S=LiLiBanque.Wire,LiLiBanque.Sync; local db,s=LiLiBanque.Core.init(nil,nil,A.guild)
+ local peer=S.new(db,s,'Lunor Brumebleue',A.guild,function() return 0 end,function() return NOW end,function() return NOW end)
+ local received={}; A.sync.q.send=function(m) received[#received+1]=m; return 0 end
+ local function flush()
+  while A.sync.q:size()>0 do
+   A.sync.q:tick(NOW,false); NOW=NOW+1
+   while #received>0 do peer:receive(table.remove(received,1),'OFFICER',A.name) end
+  end
+ end
+ flush(); eq(s.bankScanAt,200000)
+ -- A successful unchanged journal must announce the new scan time too.
+ local at=NOW+100; NOW=at; A:scanNow(); fire('GUILDBANKLOG_UPDATE'); eq(A.newLines,0)
+ flush(); eq(s.bankScanAt,at)
+ -- With an older peer, received ledger rows provide a conservative lower bound.
+ local empty,se=LiLiBanque.Core.init(nil,nil,A.guild)
+ local rx=S.new(empty,se,'Autre Officier',A.guild,function() return 0 end,function() return NOW end,function() return NOW end)
+ local r; for _,v in pairs(A.db.ledger) do r=v; break end
+ local fragments={}; local tx=S.new(A.db,A.state,A.name,A.guild,function(m) fragments[#fragments+1]=m; return 0 end,function() return NOW end)
+ tx:record('ledger','',r)
+ while tx.q:size()>0 do tx.q:tick(NOW,false); NOW=NOW+1 end
+ for _,m in ipairs(fragments) do rx:receive(m,'OFFICER',A.name) end
+ eq(LiLiBanque.Core.bankScanTime(empty,se,NOW),r.seenAt)
+end)
+test('op B bornée : valeurs hostiles, futur, champs et canal, sans changer le contrat',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); local W=LiLiBanque.Wire; local serial=0
+ local function send(value,opts)
+  opts=opts or {}; serial=serial+1
+  local f={opts.op or 'B',opts.guild or A.guild,opts.target or '',opts.col or 'bankScan','Lunor Brumebleue',value}
+  if opts.extra then f[#f+1]='extra' end
+  for _,m in ipairs(W.chunks(W.pack(f),tostring(serial))) do
+   NOW=NOW+1; A.sync:receive(m,opts.channel or 'OFFICER','Lunor-Brumebleue')
+  end
+ end
+ for _,v in ipairs({'-1','0','NaN','inf','1e309','200000.5','4102444800',tostring(NOW+86400),string.rep('9',12000),'loadstring("boom")'}) do
+  send(v); eq(A.state.bankScanAt,nil)
+ end
+ for _,opts in ipairs({{extra=true},{channel='GUILD'},{guild='Autre'},{target='Autre'},{op='D'},{col='ledger'}}) do
+  send('190000',opts); eq(A.state.bankScanAt,nil)
+ end
+ A.sync:receive(string.rep('x',100000),'OFFICER','Lunor'); eq(A.state.bankScanAt,nil)
+ send(tostring(NOW+300)); local newest=A.state.bankScanAt; assert(newest)
+ send('100000'); eq(A.state.bankScanAt,newest)
+ eq(count(A.db.ledger),0); eq(count(A.db.events),0); eq(count(A.db),9)
+end)
+test('la vraie réception 1.1.1 ignore B/bankScan et continue à recevoir le journal',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); local S=LiLiBanque.Sync
+ assert(loadfile(ROOT..'/tests/compat/sync-1.1.1.lua'))(); local oldS=LiLiBanque.Sync; LiLiBanque.Sync=S
+ local db,s=LiLiBanque.Core.init(nil,nil,A.guild)
+ local old=oldS.new(db,s,'Ancien Officier',A.guild,function() return 0 end,function() return NOW end)
+ local out={}; local tx=S.new(A.db,A.state,A.name,A.guild,function(m) out[#out+1]=m; return 0 end,function() return NOW end,function() return NOW end)
+ A.state.bankScanAt=NOW; tx:bankScan()
+ local r={id='L:Test:1:1',kind='deposit',name='Lunor Brumebleue',copper=40000,ts=NOW,tsPrecision=3600,source=A.name,seenAt=NOW}
+ tx:record('ledger','',r)
+ while tx.q:size()>0 do tx.q:tick(NOW,false); NOW=NOW+1 end
+ for _,m in ipairs(out) do old:receive(m,'OFFICER',A.name) end
+ eq(s.bankScanAt,nil); eq(count(db.ledger),1); eq(old.transferred,1)
+end)
+test('borne reçue garde le seenAt récent même pour une ligne déjà dédupliquée',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
+ local r; for _,v in pairs(A.db.ledger) do r=LiLiBanque.Core.copy(v); break end
+ r.seenAt=NOW+100; local W=LiLiBanque.Wire
+ for _,msg in ipairs(W.chunks(W.pack({'D',A.guild,'','ledger','Autre Officier',r.id,r.kind,r.name,r.copper,r.ts,r.tsPrecision,r.source,r.seenAt}),'lowerbound')) do
+  A.sync:receive(msg,'OFFICER','Autre Officier')
+ end
+ eq(A.state.bankScanAt,r.seenAt)
+end)
+test('fenêtre et diag montrent le dernier journal partagé, jamais le roster',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILD_ROSTER_UPDATE'); SlashCmdList.LILIBANQUE('')
+ assert(LiLiBanque.UI.sections[1].panel.values.scan.text:find('aucun',1,true))
+ A.state.bankScanAt=NOW-600; A:updateUI()
+ assert(LiLiBanque.UI.sections[1].panel.values.scan.text:find('officiers',1,true))
+ CHAT={}; SlashCmdList.LILIBANQUE('diag'); assert(chat('Dernier journal connu (officiers) : '))
+end)
+test('préférence et anti-spam survivent au reset local',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); SlashCmdList.LILIBANQUE('rappel off')
+ A.state.lastReminderAt=NOW
+ SlashCmdList.LILIBANQUE('reset'); SlashCmdList.LILIBANQUE('reset CONFIRMER')
+ eq(A.state.reminderEnabled,false); eq(A.state.lastReminderAt,NOW)
+end)
+test('journal refusé ou vide ne rafraîchit pas le dernier succès ; solde seul reste inconnu',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
+ local last=A.state.bankScanAt; NOW=NOW+100
+ GetNumGuildBankMoneyTransactions=function() return 0 end
+ A:scanNow(); fire('GUILDBANKLOG_UPDATE'); update(4)
+ eq(LiLiBanque.Core.bankScanTime(A.db,A.state,NOW),last)
+ QueryGuildBankLog=function() error('refusé') end; A:scanNow()
+ eq(LiLiBanque.Core.bankScanTime(A.db,A.state,NOW),last)
+ A=loadAddon(); fire('PLAYER_LOGIN'); A.db.bankMoney={{at=100,copper=0}}
+ CHAT={}; update(0); assert(chat('dernier relevé du journal d’or inconnu'))
+ eq(A.state.bankScanAt,nil)
+end)
+test('rotation après mise à jour : date du dernier succès, pas première observation ni roster',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
+ NOW=NOW+100; A:scanNow(); fire('GUILDBANKLOG_UPDATE')
+ local previous=NOW; A.state.localLedgerAt=nil -- state written by 1.1.1
+ NOW=NOW+100; fire('GUILD_ROSTER_UPDATE')
+ GetGuildBankMoneyTransaction=function() return 'deposit','Lunor Brumebleue',60000,0,0,0,0 end
+ A:scanNow(); fire('GUILDBANKLOG_UPDATE'); eq(A.state.lastGap.from,previous)
 end)
 for _,t in ipairs(tests) do
  local ok,e=pcall(t[2])

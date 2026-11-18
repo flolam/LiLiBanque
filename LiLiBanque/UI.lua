@@ -50,7 +50,8 @@ function bank.build(panel)
     for _,k in ipairs(KEYS) do
         local key=text(panel,'GameFontNormal'); key:SetPoint('TOPLEFT',8,y); key:SetWidth(110); key:SetText(k[2])
         local val=text(panel,'GameFontHighlight'); val:SetPoint('TOPLEFT',122,y); val:SetPoint('RIGHT',panel,'RIGHT',-8,0)
-        values[k[1]]=val; y=y-20
+        values[k[1]]=val
+        if k[1]=='gaps' then val:SetWordWrap(true); val:SetHeight(80); y=y-80 else y=y-20 end
     end
     panel.values=values
     local head=text(panel,'GameFontNormal'); head:SetPoint('TOPLEFT',8,y-10); head:SetText('Derniers mouvements d’or')
@@ -64,7 +65,7 @@ function bank.build(panel)
         r.ago=text(panel,'GameFontDisableSmall','RIGHT'); r.ago:SetPoint('TOPLEFT',362,y); r.ago:SetPoint('RIGHT',panel,'RIGHT',-8,0)
         panel.rows[i]=r; y=y-16
     end
-    panel.empty=text(panel,'GameFontDisableSmall'); panel.empty:SetPoint('TOPLEFT',8,-118)
+    panel.empty=text(panel,'GameFontDisableSmall'); panel.empty:SetPoint('TOPLEFT',8,-178)
     panel.hint=text(panel,'GameFontDisableSmall'); panel.hint:SetPoint('BOTTOMLEFT',8,6); panel.hint:SetPoint('RIGHT',panel,'RIGHT',-8,0)
     panel.hint:SetText('Le fichier pour le site n’est écrit qu’au /reload ou à la déconnexion.')
 end
@@ -72,11 +73,12 @@ function bank.lastScanText()
     local last=A.last
     if not A:active() then return ORANGE..A:inactiveReason()..'|r' end
     if A.pending then return 'relevé en cours…' end
-    if not last then
-        local at=A.db and A.name and A.db.scannedBy[A.name]
-        if at then return UI.when(at)..GREY..' (avant ce chargement)|r' end
-        return GREY..'aucun : ouvrez la banque de guilde|r'
+    local shared=A.db and A.state and LiLiBanque.Core.bankScanTime(A.db,A.state,A.now())
+    if shared and (not last or shared>last.at) then
+        return UI.when(shared)..GREY..' ('..UI.ago(A.now()-shared)..', officiers)|r'
+            ..(last and last.ok and (' · '..last.newLines..(last.newLines<2 and ' nouvelle ligne' or ' nouvelles lignes')..' au dernier relevé local') or '')
     end
+    if not last then return GREY..'aucun : ouvrez la banque de guilde|r' end
     local when=UI.when(last.at)..GREY..' ('..UI.ago(A.now()-last.at)..')|r'
     if last.ok then return when..' · '..last.newLines..(last.newLines<2 and ' nouvelle ligne' or ' nouvelles lignes') end
     return when..' · '..RED..tostring(last.reason)..'|r'
@@ -98,7 +100,7 @@ function bank.refresh(panel)
         v.sync:SetText(table.concat(parts,' · '))
     end
     local gaps=db and db.gaps or {}
-    v.gaps:SetText(#gaps==0 and 'aucun' or ORANGE..#gaps..'|r, dernier le '..UI.when(gaps[#gaps].at))
+    v.gaps:SetText(#gaps==0 and 'aucun' or RED..#gaps..'|r, dernier le '..UI.when(gaps[#gaps].at)..'\n'..RED..A:gapText()..'|r')
     -- Sorted once per change of the journal, not at every refresh.
     local ledger=db and db.ledger or {}; local n=0
     for _ in pairs(ledger) do n=n+1 end
@@ -151,7 +153,7 @@ function UI.create()
     UI.frame=f
     if ButtonFrameTemplate_HidePortrait then ButtonFrameTemplate_HidePortrait(f) end
     f:SetTitle('La Bande à Li Li')
-    f:SetSize(480,430)
+    f:SetSize(480,490)
     f:SetToplevel(true); f:SetMovable(true); f:EnableMouse(true); f:SetClampedToScreen(true)
     f:RegisterForDrag('LeftButton')
     f:SetScript('OnDragStart',function(self) self:StartMoving() end)

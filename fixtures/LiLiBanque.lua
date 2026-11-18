@@ -2,7 +2,7 @@
 -- Trois semaines 18/11, 25/11 et 02/12/2026 ; noms inventés.
 LiLiBanqueDB = {
   ["schema"] = 1,
-  ["addonVersion"] = "1.0.0",
+  ["addonVersion"] = "1.2.0",
   ["guild"] = "La Bande à Li Li",
   ["scannedBy"] = {
     ["Aélia Brumelune"] = 1796299200,

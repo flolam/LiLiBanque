@@ -7,6 +7,7 @@ JSON parse, then compares with the expected subset built from the Lua table itse
 from pathlib import Path
 import base64
 import binascii
+import hashlib
 import json
 import re
 import sys
@@ -17,6 +18,8 @@ except ImportError:
     sys.path.insert(0, '/opt/data/cache/scratch/lili-lua')
     from lupa.lua51 import LuaRuntime
 ROOT = Path(__file__).resolve().parents[1]
+# Exact Sync.lua shipped in v1.1.1: the compatibility test must run the real old receiver.
+assert hashlib.sha256((ROOT / 'tests/compat/sync-1.1.1.lua').read_bytes()).hexdigest() == '270cdcc94503a4dc8646b5c8e8b5aecf29b7e38a15892154f44bb396dcecf1af'
 # encoding=None: Lua strings stay bytes, so invalid UTF-8 in test data reaches Python intact.
 lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
 lua_type = lua.eval(b'type')

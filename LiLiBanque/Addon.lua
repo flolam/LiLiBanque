@@ -98,9 +98,32 @@ function A:init()
         self.sync=S.new(db,state,name,self.guild,function(msg)
             if not self.prefixOK or not self:active() or not C_ChatInfo or not C_ChatInfo.SendAddonMessage then return 9 end
             return C_ChatInfo.SendAddonMessage(S.PREFIX,msg,'OFFICER')
-        end,clock)
+        end,clock,now)
     end
-    self.status='Prêt'; self:request(); self.sync:hello()
+    self.status='Prêt'; self:request(); self.sync:hello(); self:remind()
+end
+-- One short reminder per character per two hours, including /reloads.
+function A:remind()
+    if not self:active() or not self.state or self.state.reminderEnabled==false
+        or safe(info('CanViewOfficerNote'))~=true or safe(InCombatLockdown)==true or safe(IsInInstance)==true then return end
+    if not next(self.db.ledger) and #self.db.bankMoney==0 then return end
+    local at=now(); local lastReminder=self.state.lastReminderAt
+    if type(lastReminder)=='number' and at-lastReminder<7200 then return end
+    local scan=C.bankScanTime(self.db,self.state,at)
+    local baseline=scan
+    if not baseline then
+        for _,m in ipairs(self.db.bankMoney) do
+            if C.validScanAt(m.at,at) and (not baseline or m.at>baseline) then baseline=m.at end
+        end
+    end
+    if not baseline then return end
+    local day=tonumber(safe(date,'%w',at)) -- PC local time, Sunday=0
+    if not day then return end
+    local threshold=(day==3 or day==4) and 4*3600 or 12*3600
+    if at-baseline<=threshold then return end
+    local text=scan and ('Banque pas relevée depuis '..floor((at-scan)/3600)..' h') or 'Banque : dernier relevé du journal d’or inconnu'
+    printFR(text..' : passe à la banque de guilde si tu peux, le journal d’or ne garde que les dernières lignes.')
+    self.state.lastReminderAt=at
 end
 -- Reason shown in chat and on the bank line when the addon cannot scan.
 function A:inactiveReason()
@@ -145,6 +168,14 @@ function A:finishEmpty()
     if self.db then C.scan(self.db,self.state,'ledger',{},now(),self.name) end
     self:finish(false,tabs==0 and 'journal d’or vide (aucun onglet acheté)' or 'journal d’or vide ou non autorisé pour ce rang')
 end
+function A:gapText()
+    local gaps=self.db and self.db.gaps or {}
+    local gap=gaps[#gaps]; if not gap then return nil end
+    local detail=self.state and self.state.lastGap
+    local from=detail and detail.at==gap.at and detail.from
+    local first=from and safe(date,'%d/%m %H:%M',from) or 'un relevé précédent de date inconnue'
+    return 'des dépôts ont pu être perdus entre '..first..' et '..(safe(date,'%d/%m %H:%M',gap.at) or '?')..' : vérifiez sur le site.'
+end
 function A:scanMoney()
     if not self:active() or not self.bankOpen or not self.pending then return end
     local n=safe(GetNumGuildBankMoneyTransactions)
@@ -173,9 +204,14 @@ function A:scanMoney()
         end
     end
     self.skipped=skipped; self.lastCount=#rows
-    self.newLines=C.scan(self.db,self.state,'ledger',order(rows,false),at,self.name)
+    local gap
+    self.newLines,gap=C.scan(self.db,self.state,'ledger',order(rows,false),at,self.name)
+    if gap then
+        printFR('|cffff6060Attention : '..self:gapText()..'|r')
+        safe(PlaySound,SOUNDKIT and SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON or 856)
+    end
     self:recordMoney(); self.lastScan=at
-    if self.newLines>0 and self.sync.q:size()<500 then self.sync:hello() end
+    if self.newLines>0 and self.sync.q:size()<500 then self.sync:hello() else self.sync:bankScan() end
     self:finish(true)
 end
 function A:scanEvents()
@@ -249,6 +285,7 @@ function A:tick()
     local locked=safe(C_ChatInfo and C_ChatInfo.InChatMessagingLockdown)==true
         or inRestrictedContext and safe(C_ChatInfo and C_ChatInfo.AreOutgoingAddonChatMessagesRestricted)==true
     self.sync:tick(t,locked)
+    self:remind()
     if self.bankOpen then
         if self.pending then
             if self.emptyAt and t-self.emptyAt>=3 then self:finishEmpty()
@@ -287,6 +324,10 @@ function A:diagLines()
         local members=0; for _ in pairs(self.db.roster and self.db.roster.members or {}) do members=members+1 end
         out[#out+1]='Données : '..#ids..' lignes d’or, '..#self.db.gaps..' trous, roster '..members..' membres'
     end
+    local shared=self.db and self.state and C.bankScanTime(self.db,self.state,now())
+    out[#out+1]='Dernier journal connu (officiers) : '..(shared and (safe(date,'%d/%m %H:%M',shared) or '?') or 'inconnu')
+        ..' ; rappel '..(self.state and self.state.reminderEnabled==false and 'désactivé' or 'activé')
+    out[#out+1]='Dernier trou : '..(self:gapText() or 'aucun')
     local e=self.lastError or type(LiLiBanqueState)=='table' and LiLiBanqueState.lastError
     out[#out+1]='Dernière erreur Lua : '..(e and (e.msg..' ['..tostring(e.where)..']'..(e.at and e.at>0 and safe(date,'%d/%m %H:%M',e.at) and ' le '..safe(date,'%d/%m %H:%M',e.at) or '')) or 'aucune')
     out[#out+1]='Dernière erreur d’API : '..(self.lastApiError or 'aucune')
@@ -298,6 +339,10 @@ function A:command(text)
     local raw=(text or ''):match('^%s*(.-)%s*$')
     local cmd=raw:lower()
     if cmd=='' or cmd=='ouvrir' or cmd=='show' then if LiLiBanque.UI then LiLiBanque.UI.toggle() end
+    elseif cmd=='rappel on' or cmd=='rappel off' then
+        uiState().reminderEnabled=cmd=='rappel on'
+        printFR('rappel de passage '..(uiState().reminderEnabled and 'activé' or 'désactivé')..' pour ce personnage.')
+    elseif cmd=='rappel' or cmd:match('^rappel%s') then printFR('/lili rappel on|off : rappel de passage pour ce personnage')
     elseif cmd=='diag' then self:diag()
     elseif cmd=='scan' or cmd=='relever' then self:scanNow()
     elseif cmd=='export' or cmd=='exporter' then if LiLiBanque.UI then LiLiBanque.UI.show(); LiLiBanque.UI.startExport() end
@@ -307,12 +352,13 @@ function A:command(text)
     elseif cmd=='reset' then self.confirmUntil=clock()+30; printFR('effacement local uniquement. Sauvegardez le fichier avant. Confirmez sous 30 s : /lili reset CONFIRMER')
     elseif raw=='reset CONFIRMER' then
         if self.confirmUntil and clock()<=self.confirmUntil then
-            local ui=type(LiLiBanqueState)=='table' and LiLiBanqueState.ui or nil
-            LiLiBanqueDB=nil; LiLiBanqueState={ui=ui}; self.db=nil; self.state=nil; self.sync=nil; self.confirmUntil=nil; self.last=nil
+            local st=uiState()
+            LiLiBanqueDB=nil; LiLiBanqueState={ui=st.ui,reminderEnabled=st.reminderEnabled,lastReminderAt=st.lastReminderAt}
+            self.db=nil; self.state=nil; self.sync=nil; self.confirmUntil=nil; self.last=nil
             self:init(); printFR('données locales réinitialisées. Les autres officiers pourront les resynchroniser.')
         else printFR('confirmation expirée : /lili reset') end
     else
-        printFR('/lili : fenêtre ; /lili diag : diagnostic ; /lili scan : relever (banque ouverte) ; /lili export : export pour le site ; /lili reset : effacer les données locales')
+        printFR('/lili : fenêtre ; /lili diag : diagnostic ; /lili scan : relever (banque ouverte) ; /lili export : export pour le site ; /lili rappel on|off : rappel de passage ; /lili reset : effacer les données locales')
     end
     self:updateUI()
 end
