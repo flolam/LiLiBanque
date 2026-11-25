@@ -1,6 +1,6 @@
 # LiLiBanque
 
-Addon WoW Forever pour les officiers de La Bande à Li Li. À l'ouverture de la banque de guilde, il relève le journal d'or, le solde et le roster. Il ne fait que lire.
+Addon WoW Forever pour les officiers de La Bande à Li Li. À l'ouverture de la banque de guilde, il relève le journal d'or, le solde, le roster et les objets des onglets visibles. Il ne fait que lire.
 
 ## Installation
 

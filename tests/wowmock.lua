@@ -124,10 +124,33 @@ function M.install()
     RAID_CLASS_COLORS = {PALADIN = {colorStr = 'fff48cba'}, MAGE = {colorStr = 'ff3fc7eb'}, DRUID = {colorStr = 'ffff7c0a'}}
     Enum = {PlayerInteractionType = {GuildBanker = 10}}
     date = os.date
-    GetBuildInfo = function() return '1.60.1', '70959', 'Nov 10 2026', 16001 end
+    GetBuildInfo = function() return '1.60.1', '71091', 'Nov 24 2026', 16001 end
     M.loaded = {}
     C_AddOns = {IsAddOnLoaded = function(n) return M.loaded[n] == true end}
     GuildBankFrame = nil
+    M.tabs = {{name = 'Réserves', icon = 133784, viewable = true, slots = {}}}
+    M.queries = {}; M.currentTab = 1
+    M.fileIDs = {['Interface\\Icons\\INV_Misc_QuestionMark'] = 134400}
+    GetFileIDFromPath = function(path) return M.fileIDs[path] or 0 end
+    GetNumGuildBankTabs = function() return #M.tabs end
+    GetCurrentGuildBankTab = function() return M.currentTab end
+    GetGuildBankTabInfo = function(tab)
+        local t = M.tabs[tab]
+        if t then return t.name, t.icon, t.viewable, t.deposit ~= false, 0, 0 end
+    end
+    QueryGuildBankTab = function(tab)
+        assert(M.tabs[tab] and M.tabs[tab].viewable, 'onglet inaccessible interrogé')
+        M.queries[#M.queries + 1] = {tab = tab, at = GetTime()}
+    end
+    GetGuildBankItemInfo = function(tab, slot)
+        assert(slot >= 1 and slot <= 98, 'emplacement hors limites')
+        local s = M.tabs[tab].slots[slot]
+        if s then return s.texture or 134400, s.count, s.locked or false, false, s.quality or 1 end
+    end
+    GetGuildBankItemLink = function(tab, slot)
+        local s = M.tabs[tab].slots[slot]
+        if s and not s.delayed then return '|cff1eff00|H'..s.item..'|h['..s.name..']|h|r' end
+    end
 end
 -- Simulates LoadAddOn('Blizzard_GuildBankUI') from the PlayerInteractionManager.
 function M.loadGuildBank()

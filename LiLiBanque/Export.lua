@@ -134,11 +134,15 @@ end
 local ARRAYS = {bankMoney = true, gaps = true}
 local encode
 local function isArray(t, key)
-    local n = #t
-    if n == 0 then return ARRAYS[key] == true end
-    local count = 0
-    for _ in pairs(t) do count = count + 1 end
-    return count == n
+    -- Stable maps even for {1=...}, {1=...,2=...} and an empty bank tab.
+    if key=='stock' or key=='slots' then return false end
+    local count,max=0,0
+    for k in pairs(t) do
+        if type(k)~='number' or k<1 or k~=floor(k) then return false end
+        count=count+1; if k>max then max=k end
+    end
+    if count==0 then return ARRAYS[key]==true end
+    return count==max
 end
 function encode(v, out, key)
     local kind = type(v)
@@ -186,6 +190,7 @@ function E.payload(db)
         schema = db.schema, addonVersion = db.addonVersion, guild = db.guild,
         scannedBy = db.scannedBy or {}, ledger = db.ledger or {}, events = db.events or {},
         roster = db.roster or {scannedAt = 0, members = {}}, bankMoney = money, gaps = db.gaps or {},
+        stock = db.stock or {},
     }
 end
 

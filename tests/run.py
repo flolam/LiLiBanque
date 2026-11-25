@@ -37,7 +37,7 @@ def to_py(value, key=None):
         return value
     items = list(value.items())
     keys = [k for k, _ in items]
-    if key in ARRAYS or (keys and all(isinstance(k, int) for k in keys) and sorted(keys) == list(range(1, len(keys) + 1))):
+    if key in ARRAYS or (key not in {'stock', 'slots'} and keys and all(isinstance(k, int) for k in keys) and sorted(keys) == list(range(1, len(keys) + 1))):
         return [to_py(value[i]) for i in range(1, len(keys) + 1)]
     out = {}
     for k, v in items:
@@ -48,11 +48,13 @@ def to_py(value, key=None):
 
 def expected_payload(db):
     full = to_py(db)
+    assert isinstance(full, dict)
     return {
         'schema': full['schema'], 'addonVersion': full['addonVersion'], 'guild': full['guild'],
         'scannedBy': full.get('scannedBy', {}), 'ledger': full.get('ledger', {}), 'events': full.get('events', {}),
         'roster': full.get('roster', {'scannedAt': 0, 'members': {}}),
         'bankMoney': full.get('bankMoney', [])[-30:], 'gaps': full.get('gaps', []),
+        'stock': full.get('stock', {}),
     }
 
 

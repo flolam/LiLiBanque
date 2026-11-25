@@ -42,7 +42,7 @@ function UI.addSection(section) UI.sections[#UI.sections+1]=section end
 
 ---------------------------------------------------------------- Banque
 local bank={key='banque',title='Banque'}
-local KEYS={{'scan','Dernier relevé'},{'money','Solde relevé'},{'sync','Synchro'},{'gaps','Trous'}}
+local KEYS={{'scan','Dernier relevé'},{'money','Solde relevé'},{'stock','Coffre'},{'sync','Synchro'},{'gaps','Trous'}}
 local ROWS=10
 function bank.build(panel)
     local values={}
@@ -65,7 +65,7 @@ function bank.build(panel)
         r.ago=text(panel,'GameFontDisableSmall','RIGHT'); r.ago:SetPoint('TOPLEFT',362,y); r.ago:SetPoint('RIGHT',panel,'RIGHT',-8,0)
         panel.rows[i]=r; y=y-16
     end
-    panel.empty=text(panel,'GameFontDisableSmall'); panel.empty:SetPoint('TOPLEFT',8,-178)
+    panel.empty=text(panel,'GameFontDisableSmall'); panel.empty:SetPoint('TOPLEFT',8,-198)
     panel.hint=text(panel,'GameFontDisableSmall'); panel.hint:SetPoint('BOTTOMLEFT',8,6); panel.hint:SetPoint('RIGHT',panel,'RIGHT',-8,0)
     panel.hint:SetText('Le fichier pour le site n’est écrit qu’au /reload ou à la déconnexion.')
 end
@@ -86,6 +86,7 @@ end
 function bank.refresh(panel)
     local v=panel.values; local db=A.db
     v.scan:SetText(bank.lastScanText())
+    v.stock:SetText(A:stockText():gsub('^Coffre : ',''))
     local money=db and db.bankMoney[#db.bankMoney]
     v.money:SetText(money and A.money(money.copper)..GREY..' · '..UI.when(money.at)..'|r' or GREY..'pas encore relevé|r')
     local sync=A.sync
