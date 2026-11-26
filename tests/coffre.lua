@@ -25,7 +25,7 @@ local function load()
     QueryGuildEventLog=function() end; GetNumGuildEvents=function() return 0 end; GetGuildEventInfo=function() end
     GetNumGuildMembers=function() return 1 end
     GetGuildRosterInfo=function() return 'Elvor Valbrume','Officier',1,60,'Druide','','','',true,0,'DRUID' end
-    IsInInstance=nil; InCombatLockdown=nil; issecretvalue=nil; debugprofilestop=nil
+    IsInInstance=nil; InCombatLockdown=nil; issecretvalue=nil; debugprofilestop=nil; hooksecurefunc=nil
     SIDE={}
     for _,fn in ipairs({'SetCurrentGuildBankTab','PickupGuildBankItem','SplitGuildBankItem','AutoStoreGuildBankItem','QueryGuildBankText','SetGuildBankTabInfo'}) do
         _G[fn]=function() SIDE[#SIDE+1]=fn end
@@ -333,6 +333,183 @@ local function connect(A,fire)
     end
     return db,peer,run,function(op) return counts[op] or 0 end
 end
+
+-- A post-hook observes the native request, while the unindexed update is
+-- deliberately shared by both caches as on Forever.
+local function nativeJournal(A,fire,fillDuringRequest)
+    guildBank(A)
+    local cache,lookups,requests={},{},{}
+    QueryGuildBankLog=function(tab)
+        requests[#requests+1]=tab
+        if fillDuringRequest then fillDuringRequest(cache,tab) end
+    end
+    hooksecurefunc=function(fn,after)
+        local original=assert(_G[fn]); _G[fn]=function(...) original(...); after(...) end
+    end
+    GetNumGuildBankTransactions=function(tab)
+        lookups[#lookups+1]=tab; return cache[tab] and cache[tab].n or 0
+    end
+    GetGuildBankTransaction=function(tab,i)
+        local row=cache[tab][i]; if row then return unpack(row,1,10) end
+    end
+    GuildBankFrame=MOCK.loadGuildBank(); fire('ADDON_LOADED','Blizzard_GuildBankUI'); GuildBankFrame:Show()
+    local function open(tab)
+        MOCK.currentTab=tab; GuildBankFrame.mode='log'; QueryGuildBankLog(tab)
+    end
+    local function tick()
+        for _=1,4 do NOW=NOW+0.35; A:tick() end
+    end
+    local function reading(tab) return (LiLiBanqueState.itemJournal or {})[tab] end
+    return cache,open,tick,reading,lookups,requests
+end
+local leather='|cff1eff00|Hitem:2318::::::::60:::::::::|h[Étoffe fictive]|h|r'
+local function movement(kind,name,count,src,dst)
+    return {kind,name,leather,count,src,dst,0,0,0,2}
+end
+
+test('objets : le vrai journal natif sélectionné remplace la fenêtre, jamais celle d’un autre onglet',function()
+    local A,fire=load(); local cache,open,tick,reading,lookups,requests=nativeJournal(A,fire)
+    local goldBefore=#requests; assert(goldBefore>0); eq(requests[1],9)
+    cache[2]={n=1,movement('deposit','Nom hors onglet',9)}
+    open(1); fire('GUILDBANKLOG_UPDATE'); tick(); eq(reading(1),nil)
+    local duplicate=movement('withdraw','Faron Brume',3)
+    cache[1]={n=4,movement('deposit','Bela Aubépine',2),duplicate,duplicate,movement('move','Lela Ronce',5,1,2)}
+    fire('GUILDBANKLOG_UPDATE'); tick()
+    local snap=assert(reading(1),'le journal natif chargé doit être enregistré')
+    eq(snap.name,'Le Bazar'); eq(#snap.rows,4); eq(snap.rows[1].actor,'Bela Aubépine')
+    eq(snap.rows[1].item,'item:2318::::::::60:::::::::'); eq(snap.rows[1].hours,2); eq(snap.rows[1].ts,nil)
+    eq(snap.rows[2].kind,'withdraw'); eq(snap.rows[3].count,3)
+    eq(snap.rows[4].source,1); eq(snap.rows[4].destination,2)
+    eq(reading(2),nil); eq(#SIDE,0); eq(MOCK.currentTab,1)
+    for _,tab in ipairs(lookups) do eq(tab,1) end
+    local objects=0; for _,tab in ipairs(requests) do if tab~=9 then eq(tab,1); objects=objects+1 end end
+    eq(objects,1,'seul le clic du joueur envoie la requête objet')
+end)
+
+test('objets : un premier journal déjà chargé ou rempli avant le post-hook est relevé',function()
+    for _,synchronous in ipairs({false,true}) do
+        local A,fire=load()
+        local window={n=1,movement('deposit','Aulne Fictif',7)}
+        local function fill(cache,tab)
+            if synchronous and tab==1 then cache[tab]=window end
+        end
+        local cache,open,tick,reading=nativeJournal(A,fire,fill)
+        if not synchronous then cache[1]=window end
+        open(1); eq(reading(1),nil)
+        tick()
+        local snap=assert(reading(1),'le premier journal déjà chargé est lisible sans attendre un changement')
+        eq(snap.rows[1].actor,'Aulne Fictif'); eq(snap.rows[1].count,7)
+        eq(snap.rows[1].hours,2); eq(snap.rows[1].ts,nil)
+        NOW=NOW+30; open(1); tick()
+        eq(reading(1),snap,'une relecture identique ne rafraîchit pas artificiellement la date')
+    end
+end)
+
+test('objets : les couleurs nommées des liens ne bloquent pas le journal',function()
+    local A,fire=load(); local cache,open,tick,reading=nativeJournal(A,fire)
+    local named='|cnIQ2:|Hitem:2318::::::::60:::::::::|h[Étoffe fictive]|h|r'
+    local bare='|Hitem:111:0:0:0:0:0:-12|h[Étoffe sans couleur]|h'
+    open(1)
+    cache[1]={n=3,movement('withdraw','Ronce Fictive',1),
+        {'deposit','Aulne Fictif',named,3}, {'withdraw','Brume Fictive',bare,2}}
+    tick()
+    local rows=assert(reading(1),'une couleur nommée ne doit pas rejeter la fenêtre').rows
+    eq(#rows,3); eq(rows[2].item,'item:2318::::::::60:::::::::'); eq(rows[2].label,'Étoffe fictive')
+    eq(rows[3].item,'item:111:0:0:0:0:0:-12'); eq(rows[3].label,'Étoffe sans couleur')
+end)
+
+test('objets : un nom absent conserve la transaction et les autres lignes',function()
+    local A,fire=load(); local cache,open,tick,reading=nativeJournal(A,fire)
+    open(1)
+    cache[1]={n=3,{'withdraw',nil,leather,2},movement('deposit','Aulne Fictif',3),{'withdraw','',leather,4}}
+    tick()
+    local rows=assert(reading(1),'un acteur absent ne doit pas effacer la fenêtre').rows
+    eq(#rows,3); eq(rows[1].actor,'Inconnu'); eq(rows[1].count,2)
+    eq(rows[2].actor,'Aulne Fictif'); eq(rows[3].actor,'Inconnu'); eq(rows[3].count,4)
+end)
+
+test('objets : sous-vue passive, âge natif, pagination et droits revérifiés sur les deux bouts',function()
+    local A,fire=load(); local cache,open,tick,reading,_,requests=nativeJournal(A,fire)
+    local UI,panel=coffre(); assert(panel.itemToggle,'il manque le bouton Journal d’objets')
+    local before=#requests
+    panel.itemToggle:Click(); has(panel.message.text,'Pas encore relevé')
+    has(panel.message.text,'journal d’objets'); hasnt(panel.message.text,'vide')
+    assert(not UI.scanButton:IsShown(),'Relever ne doit pas laisser croire qu’il relit le journal d’objets')
+    panel.chips[2]:Click(); eq(UI.coffreTab,2); eq(#requests,before)
+    panel.chips[1]:Click(); panel.itemToggle:Click(); assert(UI.scanButton:IsShown()); panel.itemToggle:Click()
+    eq(GuildBankFrame.mode,nil); eq(MOCK.currentTab,1)
+    open(1)
+    cache[1]={n=8,movement('move','Brume Lilas',5,1,2)}
+    for i=2,7 do cache[1][i]=movement('deposit','Brume Ronce',1) end
+    cache[1][8]={'withdraw','Dernière Lune',leather,3,nil,nil,nil,nil,nil,nil}
+    tick()
+    eq(#reading(1).rows,8)
+    has(panel.detail.text,'Fenêtre lue'); has(frameText(),'Brume Lilas'); has(frameText(),'Étoffe fictive ×5')
+    has(frameText(),'Déplacement'); has(frameText(),'Le Bazar → Potions'); has(frameText(),'il y a 2 h')
+    local row=panel.itemJournal.rows[1]
+    row:fire('OnEnter'); eq(MOCK.tooltip.link,'item:2318::::::::60:::::::::'); assert(MOCK.tooltip.shown)
+    MOCK.tabs[2].viewable=false; A:updateUI(); hasnt(frameText(),'Potions'); has(frameText(),'onglet masqué')
+    panel.itemJournal.next:Click(); has(frameText(),'Dernière Lune'); has(frameText(),'moins d’une heure')
+    panel.itemJournal.prev:Click(); row:fire('OnEnter'); assert(MOCK.tooltip.shown)
+    MOCK.tabs[1].viewable=nil; A:updateUI(); assert(not MOCK.tooltip.shown)
+    hasnt(frameText(),'Brume Lilas'); hasnt(frameText(),'Étoffe fictive'); has(panel.message.text,'droits')
+    MOCK.tabs[1].viewable=true; A:updateUI(); has(frameText(),'Brume Lilas')
+    GetGuildInfo=function() return 'Une autre guilde' end
+    row:fire('OnEnter'); assert(not MOCK.tooltip.shown); A:updateUI(); hasnt(frameText(),'Brume Lilas')
+    eq(#SIDE,0); eq(MOCK.currentTab,1)
+end)
+
+test('objets : cache froid, partiel ou ancien et événement d’or ne remplacent pas la fenêtre précédente',function()
+    local A,fire=load(); local cache,open,tick,reading=nativeJournal(A,fire)
+    open(1); cache[1]={n=1,movement('deposit','Unique Sureau',7)}; tick()
+    local previous=assert(reading(1)); NOW=NOW+30
+    open(1); cache[1][1][10]=3
+    GetNumGuildBankMoneyTransactions=function() return 1 end
+    GetGuildBankMoneyTransaction=function() return 'deposit','Faron Brume',100,0,0,0,0 end
+    A:scanNow(); fire('GUILDBANKLOG_UPDATE'); tick()
+    assert(next(A.db.ledger),'le journal d’or continue de passer')
+    eq(reading(1),previous); eq(previous.rows[1].hours,2)
+    cache[1]=nil; open(1); fire('GUILDBANKLOG_UPDATE'); tick(); eq(reading(1),previous)
+    cache[1]={n=2,movement('deposit','Partiel Aulne',4)}; tick(); eq(reading(1),previous)
+    cache[1][2]={'deposit','Mauvais Lien','|Hspell:1|h[Piège]|h',1,nil,nil,0,0,0,0}
+    tick(); eq(reading(1),previous)
+    cache[1][2]=movement('withdraw','Retrait Sureau',2); tick()
+    eq(#reading(1).rows,2); assert(reading(1).observedAt>previous.observedAt)
+    local longer=reading(1); open(1)
+    cache[1]={n=1,movement('deposit','Cache tronqué',1)}; tick(); eq(reading(1),longer)
+    open(1); cache[1]={n=1,movement('deposit','À ne pas garder',1)}
+    open(2); tick(); eq(reading(1).rows[1].actor,'Partiel Aulne'); eq(reading(2),nil)
+    open(1); cache[1]={n=1,movement('withdraw','Droits retirés',1)}
+    MOCK.tabs[1].viewable=false; tick(); eq(reading(1).rows[1].actor,'Partiel Aulne')
+end)
+
+test('objets : SavedVariables par personnage, export identique et absent des vrais paquets OFFICER',function()
+    local A,fire=load(); local cache,open,tick,reading=nativeJournal(A,fire)
+    local E,W=LiLiBanque.Export,LiLiBanque.Wire
+    local packets,rx={},W.receiver()
+    C_ChatInfo.SendAddonMessage=function(_,msg,channel)
+        eq(channel,'OFFICER'); local packet=rx:push('sender',msg,NOW)
+        if packet then packets[#packets+1]=assert(W.unpack(packet)) end
+        return 0
+    end
+    local before=E.build(A.db); local dbBefore=serialize(A.db)
+    open(1); cache[1]={n=1,movement('deposit','Témoin local',7)}; tick()
+    local db,state=LiLiBanqueDB,LiLiBanqueState
+    eq(serialize(db),dbBefore); eq(E.build(db),before); assert(reading(1))
+    A.sync:hello(); for _=1,80 do NOW=NOW+0.5; A.sync:tick(NOW,false) end
+    assert(#packets>0)
+    for _,fields in ipairs(packets) do
+        for _,field in ipairs(fields) do hasnt(field,'Témoin local'); hasnt(field,'item:2318') end
+    end
+    local B=load(); guildBank(B); LiLiBanqueDB=db
+    GetUnitName=function() return 'Reroll Fictif' end
+    B.frame:fire('OnEvent','PLAYER_LOGIN'); eq(B:itemJournalView(1),nil)
+    LiLiBanqueState=state; B.frame:fire('OnEvent','PLAYER_LOGIN'); eq(B:itemJournalView(1),nil,'un autre perso ne voit pas ce journal')
+    A=load(); guildBank(A); LiLiBanqueDB,LiLiBanqueState=db,state; A.frame:fire('OnEvent','PLAYER_LOGIN')
+    local s=assert(A:itemJournalView(1)); eq(s.rows[1].actor,'Témoin local')
+    MOCK.tabs[1].name='Onglet renommé'; eq(A:itemJournalView(1),nil)
+    MOCK.tabs[1].name='Le Bazar'; s.guild='Guilde précédente'; eq(A:itemJournalView(1),nil)
+end)
 
 test('P2P : offre retenue sans métadonnées ni droits, reprise avant le prochain heartbeat',function()
     local A,fire=load()

@@ -436,6 +436,113 @@ function A:tickStock(t)
     end
 end
 
+-- Object logs are only observed when the player opens the native item log.
+-- Forever d9c22e32: GuildBankUI's Log mode queries the selected tab. Its shared
+-- GUILDBANKLOG_UPDATE event has no payload and cannot confirm any object reply.
+local ITEM_JOURNAL_LIMIT,ITEM_JOURNAL_SECONDS,ITEM_JOURNAL_INTERVAL=1000,8,0.5
+local ITEM_KINDS={deposit=true,withdraw=true,move=true}
+local function integer(n,min,max)
+    return type(n)=='number' and n>=min and n<=max and n==floor(n)
+end
+local function journalText(s,max)
+    return type(s)=='string' and #s>0 and #s<=max and not s:find('[|%c]')
+end
+local function journalItem(link)
+    if type(link)~='string' or #link>512 then return end
+    local inner=link:match('^|c%x%x%x%x%x%x%x%x(|H.*)$')
+        or link:match('^|cn[%w_]+:(|H.*)$') or link
+    local item,label=inner:gsub('|r$',''):match('^|H(item:%d+[:%d%-]*)|h%[([^|]+)%]|h$')
+    if item and #item<=240 and journalText(label,240) then return item,label end
+end
+local function sameWindow(a,b)
+    if not a or not b or #a~=#b then return false end
+    for i,r in ipairs(a) do
+        local s=b[i]
+        -- A relative age changing on its own is not a new window.
+        if type(s)~='table' or r.kind~=s.kind or r.actor~=s.actor or r.item~=s.item or r.label~=s.label
+            or r.count~=s.count or r.source~=s.source or r.destination~=s.destination then return false end
+    end
+    return true
+end
+function A:itemJournalTab(tab)
+    local name,_,viewable=stockTabInfo(self,tab)
+    if viewable==false then return nil,'denied' end
+    if viewable~=true or not journalText(name,240) then return nil,'unknown' end
+    return name
+end
+function A:itemJournalView(tab)
+    local name,reason=self:itemJournalTab(tab)
+    if not name then return nil,reason end
+    local journals=self.state and self.state.itemJournal
+    local s=type(journals)=='table' and journals[tab]
+    if type(s)=='table' and s.guild==self.guild and s.character==self.name and s.name==name
+        and integer(s.observedAt,1,4102444800) and type(s.rows)=='table' and #s.rows>0 then return s,'read' end
+    return nil,'unread'
+end
+function A:readItemJournal(tab)
+    local n=safe(GetNumGuildBankTransactions,tab)
+    -- Even a real zero is indistinguishable from a cold cache or denied log.
+    if not integer(n,1,ITEM_JOURNAL_LIMIT) then return end
+    local rows={}
+    for i=1,n do
+        local kind,actor,link,count,src,dst,y,m,d,h=safe(GetGuildBankTransaction,tab,i)
+        local item,label=journalItem(link)
+        -- Blizzard's item log renders missing character names as UNKNOWN.
+        if actor==nil or actor=='' then actor='Inconnu' end
+        -- TimeUtil.GetRecentTimeDate treats absent units the same as zero.
+        if y==nil then y=0 end; if m==nil then m=0 end; if d==nil then d=0 end; if h==nil then h=0 end
+        if not ITEM_KINDS[kind] or not journalText(actor,160) or not item or not integer(count,1,1e9)
+            or not integer(y,0,1e9) or not integer(m,0,1e9) or not integer(d,0,1e9) or not integer(h,0,1e9) then return end
+        if kind=='move' then
+            if not integer(src,1,8) or not integer(dst,1,8) or (src~=tab and dst~=tab) then return end
+        elseif kind=='deposit' then src,dst=nil,tab
+        else src,dst=tab,nil end
+        rows[i]={kind=kind,actor=actor,item=item,label=label,count=count,source=src,destination=dst,
+            years=y,months=m,days=d,hours=h}
+    end
+    return rows
+end
+local function nativeItemTab(self)
+    local bank=_G.GuildBankFrame
+    if self.bankOpen and bank and bank.mode=='log' and safe(bank.IsVisible,bank)==true then
+        return safe(GetCurrentGuildBankTab)
+    end
+end
+function A:observeItemJournalQuery(tab)
+    if tab~=nativeItemTab(self) or not self.state then return end
+    local name=self:itemJournalTab(tab)
+    if not name then return end
+    local t=clock()
+    local baseline=self:readItemJournal(tab)
+    local previous=self:itemJournalView(tab)
+    -- A shorter window might be valid, but might also be a truncated cache.
+    -- Preserve known rows when the client cannot disambiguate those cases.
+    -- A first read may observe an already-loaded native window; it does not
+    -- claim the server refreshed it. For updates keep the previous capture
+    -- unless the client shows a different coherent window after the query.
+    self.itemLogRead={tab=tab,name=name,baseline=previous and baseline,minRows=math.max(baseline and #baseline or 0,previous and #previous.rows or 0),
+        due=t+ITEM_JOURNAL_INTERVAL,expires=t+ITEM_JOURNAL_SECONDS}
+end
+function A:tickItemJournal(t)
+    local read=self.itemLogRead
+    if not read then return end
+    local tab=read.tab
+    if t>=read.expires or nativeItemTab(self)~=tab or self:itemJournalTab(tab)~=read.name then
+        self.itemLogRead=nil; return
+    end
+    if t<read.due then return end
+    read.due=t+ITEM_JOURNAL_INTERVAL
+    local rows=self:readItemJournal(tab)
+    if not rows or #rows<read.minRows or sameWindow(rows,read.baseline) then read.candidate=nil; return end
+    if not sameWindow(rows,read.candidate) then read.candidate=rows; return end
+    self.itemLogRead=nil
+    local previous=self:itemJournalView(tab)
+    if previous and sameWindow(rows,previous.rows) then return end
+    if type(self.state.itemJournal)~='table' then self.state.itemJournal={} end
+    self.state.itemJournal[tab]={guild=self.guild,character=self.name,name=read.name,observedAt=now(),rows=rows}
+    self:updateUI()
+end
+
 -- Bank opening: several signals (legacy event, interaction manager, frame OnShow),
 -- because Blizzard_GuildBankUI is LoadOnDemand and GuildBankFrame may not exist yet.
 function A:hookBankFrame()
@@ -444,6 +551,9 @@ function A:hookBankFrame()
     self.hooked=true
     bank:HookScript('OnShow',function() A:guard('GuildBankFrame:OnShow',A.bankOpened,A,'cadre') end)
     bank:HookScript('OnHide',function() A:guard('GuildBankFrame:OnHide',A.bankClosed,A) end)
+    if type(hooksecurefunc)=='function' and type(QueryGuildBankLog)=='function' then
+        safe(hooksecurefunc,'QueryGuildBankLog',function(tab) A:guard('Journal d’objets',A.observeItemJournalQuery,A,tab) end)
+    end
 end
 function A:bankOpened(via)
     self:hookBankFrame()
@@ -457,6 +567,7 @@ function A:bankOpened(via)
 end
 function A:bankClosed()
     if not self.bankOpen then return end
+    self.itemLogRead=nil
     if self.pending then self.pending=false; self.status='Banque fermée avant la réponse du journal' end
     if self.stockScan then
         local detail=self.stockScan.pendingReason
@@ -476,6 +587,7 @@ function A:tick()
     local t=clock()
     if not self.db and t>=self.nextInit then self:init() end
     if not self.nextUI or t>=self.nextUI then self.nextUI=t+(LiLiBanque.UI and LiLiBanque.UI.isShown() and 1 or 5); self:updateUI() end
+    self:tickItemJournal(t)
     if not self:active() then return end
     -- Forever addons report the broad restriction flag even outside instances.
     -- Respect actual lockdown unconditionally, and let the send result decide in the open world.
@@ -567,6 +679,7 @@ function A:command(text)
             self.stockScan=nil; self.stockDue=nil; self.stockRefresh=nil; self.stockStatus=nil; self.stockManual=nil
             self.stockTab=nil; self.stockNextQuery=nil
             self.stockBought=nil; self.stockVisible=nil; self.stockMeta=nil
+            self.itemLogRead=nil
             self:init(); printFR('données locales réinitialisées. Les autres officiers pourront les resynchroniser.')
         else printFR('confirmation expirée : /lili reset') end
     else
@@ -584,7 +697,10 @@ function A:onEvent(event,...)
             local bank=_G.GuildBankFrame
             if self.bankOpen or bank and bank.IsShown and bank:IsShown() then self:bankOpened('chargement') end
         end
-    elseif event=='PLAYER_GUILD_UPDATE' then if not self.db then self:init() end
+    elseif event=='PLAYER_GUILD_UPDATE' then
+        if not self.db then self:init() end
+        if not self:inGuild() then self.itemLogRead=nil end
+        self:updateUI()
     elseif event=='GUILDBANKFRAME_OPENED' then self:bankOpened('événement')
     elseif event=='GUILDBANKFRAME_CLOSED' then self:bankClosed()
     elseif event=='PLAYER_INTERACTION_MANAGER_FRAME_SHOW' then
@@ -594,7 +710,7 @@ function A:onEvent(event,...)
         local kind=...; local want=Enum and Enum.PlayerInteractionType and Enum.PlayerInteractionType.GuildBanker or GUILD_BANKER
         if kind==want then self:bankClosed() end
     elseif event=='GUILDBANKBAGSLOTS_CHANGED' then self:stockChanged()
-    elseif event=='GUILDBANK_UPDATE_TABS' then self:stockTabsChanged()
+    elseif event=='GUILDBANK_UPDATE_TABS' then self:stockTabsChanged(); self:updateUI()
     elseif event=='GUILDBANKLOG_UPDATE' then self:scanMoney()
     elseif event=='GUILDBANK_UPDATE_MONEY' then
         if self:active() and self.bankOpen then

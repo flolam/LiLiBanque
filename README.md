@@ -17,6 +17,10 @@ Ou à la main : extraire le zip de la dernière release dans `_forever_\Interfac
 - `/lili rappel on|off` : active ou désactive le rappel de passage à la banque pour ce personnage
 - `/lili reset` : efface les données locales
 
+## Journal d’objets
+
+À la banque de guilde, ouvrez le journal d’objets du jeu pour l’onglet voulu, puis `/lili` → Coffre → Journal d’objets. L’addon conserve localement le dernier relevé des mouvements récents, sans modifier la banque.
+
 ## Licence
 
 Voir [LICENSE](LICENSE).

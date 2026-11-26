@@ -229,14 +229,20 @@ UI.QUESTION=QUESTION
 -- Blizzard item-quality colours, border only from Uncommon up (as the native bag/bank buttons).
 local QUALITY={[2]={0.12,1,0},[3]={0,0.44,0.87},[4]={0.64,0.21,0.93},[5]={1,0.5,0},[6]={0.9,0.8,0.5},[7]={0,0.8,1}}
 local ITEM_LINK='^item:%d+[:%d%-]*$'
+local JOURNAL_ROWS,JOURNAL_ROW_H=7,29
+local JOURNAL_KINDS={deposit='Dépôt',withdraw='Retrait',move='Déplacement'}
 -- Tabs this character may see right now, in bank order. Never reads A.db.stock.
-function UI.coffreTabs()
+function UI.coffreTabs(journal)
     local out={tabs={},bought=nil,hidden=0,unknown=0}
     local n=A.safe(GetNumGuildBankTabs)
     if type(n)~='number' or n<0 or n>MAX_TABS or n~=floor(n) then return out end
     out.bought=n
     for i=1,n do
         local name,icon,viewable=A.safe(GetGuildBankTabInfo,i)
+        if journal and viewable==true then
+            name=A:itemJournalTab(i)
+            if not name then viewable=nil end
+        end
         if viewable==true then
             out.tabs[#out.tabs+1]={index=i,name=type(name)=='string' and name~='' and name or ('Onglet '..i),icon=icon}
         elseif viewable==false then out.hidden=out.hidden+1
@@ -253,6 +259,8 @@ function UI.tabViewable(tab)
 end
 function UI.coffreSelect(tab)
     if not UI.tabViewable(tab) then return end
+    if UI.showItemJournal and not A:itemJournalTab(tab) then return end
+    if UI.coffreTab~=tab then UI.itemJournalPage=1 end
     UI.coffreTab=tab; UI.refresh()
 end
 UI.iconCache={}
@@ -271,7 +279,7 @@ local function tooltipOwner()
 end
 local function hideCoffreTooltip(includeTabs)
     local owner=tooltipOwner()
-    if owner and (owner.liliSlot or includeTabs and owner.liliCoffreTab) then GameTooltip:Hide() end
+    if owner and (owner.liliSlot or owner.liliJournalRow or includeTabs and owner.liliCoffreTab) then GameTooltip:Hide() end
 end
 function UI.slotEnter(s)
     if not s.item or not s.tab or not GameTooltip or not UI.tabViewable(s.tab) then return end
@@ -279,9 +287,51 @@ function UI.slotEnter(s)
 end
 function UI.chipEnter(c)
     if not c.tab or not GameTooltip or not UI.tabViewable(c.tab) then return end
+    if UI.showItemJournal and c.name~=A:itemJournalTab(c.tab) then return end
     GameTooltip:SetOwner(c,'ANCHOR_BOTTOM'); GameTooltip:SetText(c.name or ''); GameTooltip:Show()
 end
 local function leave(self) if tooltipOwner()==self then GameTooltip:Hide() end end
+local function journalHover(row)
+    if not GameTooltip or not row.item or not row.item:match(ITEM_LINK) or not row:IsVisible()
+        or row.tab~=UI.coffreTab or A:itemJournalView(row.tab)~=row.snapshot then return leave(row) end
+    GameTooltip:SetOwner(row,'ANCHOR_RIGHT'); GameTooltip:SetHyperlink(row.item); GameTooltip:Show()
+end
+local function journalButton(parent,label,width)
+    local b=CreateFrame('Button',nil,parent,'UIPanelButtonTemplate'); b:SetSize(width,22); b:SetText(label)
+    return b
+end
+local function buildItemJournal(panel)
+    local j=CreateFrame('Frame',nil,panel)
+    j:SetPoint('TOPLEFT',10,-88); j:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-10,-88); j:SetHeight(235)
+    j.rows={}; panel.itemJournal=j
+    for i=1,JOURNAL_ROWS do
+        local y=-(i-1)*JOURNAL_ROW_H
+        local row=CreateFrame('Frame',nil,j); row.liliJournalRow=true
+        row:SetPoint('TOPLEFT',0,y); row:SetPoint('TOPRIGHT',j,'TOPRIGHT',0,y); row:SetHeight(JOURNAL_ROW_H)
+        if i%2==1 then
+            local bg=row:CreateTexture(nil,'BACKGROUND'); bg:SetAllPoints(); bg:SetColorTexture(0.90,0.85,0.76,0.05)
+        end
+        row.label=text(row,'GameFontHighlight'); row.label:SetPoint('TOPLEFT',6,-1); row.label:SetPoint('TOPRIGHT',row,'TOPRIGHT',-112,-1)
+        row.age=text(row,'GameFontHighlightSmall','RIGHT'); row.age:SetPoint('TOPLEFT',row,'TOPRIGHT',-108,-2); row.age:SetPoint('TOPRIGHT',row,'TOPRIGHT',-6,-2)
+        row.action=text(row,'GameFontHighlightSmall'); row.action:SetPoint('BOTTOMLEFT',6,3); row.action:SetPoint('BOTTOMRIGHT',row,'BOTTOMRIGHT',-6,3)
+        row:EnableMouse(true)
+        row:SetScript('OnEnter',function(self) A:guard('Journal d’objets',journalHover,self) end)
+        row:SetScript('OnLeave',leave); j.rows[i]=row
+    end
+    j.prev=journalButton(j,'Préc.',64); j.next=journalButton(j,'Suiv.',64)
+    j.prev:SetPoint('BOTTOMLEFT',0,0); j.next:SetPoint('BOTTOMRIGHT',0,0)
+    j.page=text(j,'GameFontHighlightSmall','CENTER'); j.page:SetPoint('BOTTOMLEFT',70,5); j.page:SetPoint('BOTTOMRIGHT',j,'BOTTOMRIGHT',-70,5)
+    local function page(delta)
+        hideCoffreTooltip(); UI.itemJournalPage=(UI.itemJournalPage or 1)+delta; UI.refresh()
+    end
+    j.prev:SetScript('OnClick',function() page(-1) end); j.next:SetScript('OnClick',function() page(1) end)
+    j:Hide()
+    panel.itemToggle=journalButton(panel,'Journal d’objets',132)
+    panel.itemToggle:SetPoint('BOTTOMRIGHT',-8,1)
+    panel.itemToggle:SetScript('OnClick',function()
+        hideCoffreTooltip(true); UI.showItemJournal=not UI.showItemJournal; UI.itemJournalPage=1; UI.refresh()
+    end)
+end
 function vault.build(panel)
     panel.chips={}
     for i=1,MAX_TABS do
@@ -319,7 +369,45 @@ function vault.build(panel)
     end
     panel.message=text(panel,'GameFontHighlight','CENTER'); panel.message:SetPoint('TOPLEFT',20,-150); panel.message:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-20,-150)
     panel.message:SetWordWrap(true); panel.message:SetHeight(60)
-    panel.hint=text(panel,'GameFontHighlightSmall'); panel.hint:SetPoint('BOTTOMLEFT',10,6); panel.hint:SetPoint('BOTTOMRIGHT',panel,'BOTTOMRIGHT',-10,6)
+    panel.hint=text(panel,'GameFontHighlightSmall'); panel.hint:SetPoint('BOTTOMLEFT',10,6); panel.hint:SetPoint('BOTTOMRIGHT',panel,'BOTTOMRIGHT',-148,6)
+    buildItemJournal(panel)
+end
+local function clearJournalRow(row)
+    leave(row); row.tab,row.item,row.snapshot=nil,nil,nil
+    row.label:SetText(''); row.action:SetText(''); row.age:SetText(''); row:Hide()
+end
+local function clearJournal(j)
+    if not j:IsShown() then return end
+    for _,row in ipairs(j.rows) do clearJournalRow(row) end
+    j.page:SetText(''); j:Hide()
+end
+local function journalAge(r)
+    if r.years>0 then return 'il y a '..r.years..' an'..(r.years>1 and 's' or '') end
+    if r.months>0 then return 'il y a '..r.months..' mois' end
+    if r.days>0 then return 'il y a '..r.days..' j' end
+    if r.hours>0 then return 'il y a '..r.hours..' h' end
+    return 'moins d’une heure'
+end
+local function paintJournal(j,tab,snap)
+    local pages=math.ceil(#snap.rows/JOURNAL_ROWS)
+    local page=math.min(pages,math.max(1,UI.itemJournalPage or 1)); UI.itemJournalPage=page
+    j.prev:SetShown(pages>1); j.next:SetShown(pages>1)
+    j.prev:SetEnabled(page>1); j.next:SetEnabled(page<pages)
+    j.page:SetText(pages>1 and (page..' / '..pages) or '')
+    local function tabName(i) return A:itemJournalTab(i) or 'onglet masqué' end
+    for i,row in ipairs(j.rows) do
+        local r=snap.rows[(page-1)*JOURNAL_ROWS+i]
+        if r then
+            if row.snapshot~=snap or row.tab~=tab or row.item~=r.item then leave(row) end
+            row.snapshot,row.tab,row.item=snap,tab,r.item
+            row.label:SetText(r.label..' ×'..r.count)
+            local route=r.kind=='move' and (tabName(r.source)..' → '..tabName(r.destination))
+                or r.kind=='deposit' and ('vers '..tabName(r.destination)) or 'depuis '..tabName(r.source)
+            row.action:SetText(AMBER..JOURNAL_KINDS[r.kind]..'|r · '..r.actor..' · '..route)
+            row.age:SetText(journalAge(r)); row:Show()
+        else clearJournalRow(row) end
+    end
+    j:Show()
 end
 local function clearSlot(s)
     s.tab=nil; s.item=nil; s.missing=nil
@@ -355,10 +443,13 @@ function vault.paint(panel,tab,snap,t)
     panel.missing=missing or nil; panel.retryAt=t+2
 end
 function vault.refresh(panel)
-    local model=A.db and A:active() and UI.coffreTabs() or {tabs={},hidden=0,unknown=0}
+    local journal=UI.showItemJournal
+    local model=A.db and A:active() and UI.coffreTabs(journal) or {tabs={},hidden=0,unknown=0}
     local tabs=model.tabs; local sel
     for _,tb in ipairs(tabs) do if tb.index==UI.coffreTab then sel=tb end end
-    sel=sel or tabs[1]; UI.coffreTab=sel and sel.index or nil
+    sel=sel or tabs[1]
+    if UI.coffreTab~=(sel and sel.index) then UI.itemJournalPage=1 end
+    UI.coffreTab=sel and sel.index or nil
     -- Tab selector: real names and order, width shared by the visible tabs.
     local n=#tabs; local w=n>0 and math.min(124,floor((PANEL_W-20-(n-1)*4)/n)) or 0
     for i,c in ipairs(panel.chips) do
@@ -378,10 +469,11 @@ function vault.refresh(panel)
         end
     end
     local hidden=model.hidden>0 and ' · '..(model.hidden==1 and '1 onglet non visible pour votre rang' or model.hidden..' onglets non visibles pour votre rang') or ''
-    panel.hint:SetText(GREY..'Lecture seule'..hidden..'|r')
+    panel.itemToggle:SetText(journal and 'Voir le stock' or 'Journal d’objets')
+    panel.hint:SetText(GREY..(journal and 'Actualiser : journal d’objets du jeu' or ('Lecture seule'..hidden))..'|r')
     local function nothing(msg)
         panel.tabTitle:SetText(''); panel.summary:SetText(''); panel.detail:SetText('')
-        vault.clear(panel); panel.grid:Hide(); panel.message:SetText(msg)
+        vault.clear(panel); panel.grid:Hide(); clearJournal(panel.itemJournal); panel.message:SetText(msg)
     end
     if not A.db or not A:active() then return nothing(ORANGE..A:inactiveReason()..'|r') end
     if not sel then
@@ -389,6 +481,23 @@ function vault.refresh(panel)
         if model.bought and model.bought>0 and model.unknown==0 then return nothing('Aucun onglet visible pour votre rang.') end
         return nothing('Onglets pas encore connus.\n'..GREY..'Ouvrez la banque de guilde pour vérifier vos droits.|r')
     end
+    if journal then
+        vault.clear(panel); panel.grid:Hide()
+        local snap,status=A:itemJournalView(sel.index)
+        panel.tabTitle:SetText(AMBER..sel.name..'|r')
+        panel.summary:SetText('')
+        if not snap then
+            clearJournal(panel.itemJournal); panel.detail:SetText('')
+            local msg=status=='unread' and ('Pas encore relevé.\n'..GREY
+                ..'À la banque de guilde, ouvrez le journal d’objets de l’onglet « '..sel.name..' ».|r')
+                or 'Droits de lecture non confirmés.'
+            panel.message:SetText(msg); return
+        end
+        panel.message:SetText('')
+        panel.detail:SetText(GREY..'Fenêtre lue '..UI.ago(A.now()-snap.observedAt)..' · âges au relevé|r')
+        return paintJournal(panel.itemJournal,sel.index,snap)
+    end
+    clearJournal(panel.itemJournal)
     local snap=A.db.stock and A.db.stock[sel.index]
     if type(snap)~='table' or type(snap.slots)~='table' or type(snap.scannedAt)~='number' then
         nothing('Pas encore relevé.\n'..GREY..(A.bankOpen and 'Sélectionnez l’onglet « '..sel.name..' » dans la banque de guilde.'
@@ -481,7 +590,7 @@ function UI.refresh()
     UI.header:SetText(UI.exporting and 'Export pour le site' or s.heading or s.title)
     if not UI.exporting then s.refresh(s.panel) end
     UI.scanButton:SetEnabled(A.bankOpen==true and A:active() and not UI.exporting)
-    UI.scanButton:SetShown(not UI.exporting)
+    UI.scanButton:SetShown(not UI.exporting and not (s==vault and UI.showItemJournal))
     UI.exportButton:SetText(UI.exporting and 'Retour' or 'Exporter…')
     UI.exportButton:SetEnabled(UI.exporting or A.db~=nil)
     UI.footer:SetText(A.bankOpen and JADE..'Banque ouverte|r' or GREY..'Banque fermée|r')
