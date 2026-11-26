@@ -6,6 +6,7 @@ from zipfile import ZipFile
 import importlib.util
 import json
 import os
+import struct
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('package', ROOT / 'scripts/package.py')
@@ -33,6 +34,15 @@ with TemporaryDirectory(prefix='lili-package-', dir=os.environ.get('TMPDIR') or 
         assert listed == ['Core.lua', 'Wire.lua', 'Sync.lua', 'Export.lua', 'Addon.lua', 'UI.lua'], listed
         for name in listed:
             assert b'loadstring' not in archive.read('LiLiBanque/' + name), name
+        art = archive.read('LiLiBanque/Art/LiLiNote.tga')
+        assert art == (ROOT / 'LiLiBanque/Art/LiLiNote.tga').read_bytes()
+        width, height, depth, descriptor = struct.unpack_from('<HHBB', art, 12)
+        assert art[:3] == bytes((0, 0, 2)), 'expected uncompressed true-color TGA without a palette or ID'
+        assert (width, height, depth, descriptor & 15) == (512, 512, 32, 8)
+        pixels = art[18:18 + width * height * 4]
+        assert len(pixels) == width * height * 4
+        alpha = pixels[3::4]
+        assert min(alpha) == 0 and max(alpha) == 255, 'expected real alpha and opaque art'
     metadata = json.loads((out / 'release.json').read_text(encoding='utf-8'))
     # WowUp: release.nolib===false, metadata.flavor==='forever', matching asset.name.
     release = next(r for r in metadata['releases'] if r['nolib'] is False
@@ -44,4 +54,4 @@ with TemporaryDirectory(prefix='lili-package-', dir=os.environ.get('TMPDIR') or 
         raise AssertionError('mismatched tag accepted')
     except ValueError:
         pass
-print(f'PASS packaging v{version} : layout, ordre TOC, CRC, metadata WowUp forever/16001, garde du tag')
+print(f'PASS packaging v{version} : layout, ordre TOC, texture RGBA, CRC, metadata WowUp forever/16001, garde du tag')

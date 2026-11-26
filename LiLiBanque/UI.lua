@@ -665,17 +665,153 @@ function UI.toggleExport()
     if UI.exporting then UI.hideExport(); UI.select(UI.current or 1) else UI.startExport() end
 end
 
+---------------------------------------------------------------- Sceau de Li Li (banque de guilde)
+-- Only on the native guild bank, never in /lili. Geometry re-read in Blizzard_GuildBankUI/Mainline/
+-- Blizzard_GuildBankUI.xml (Forever d9c22e32, 1.60.1.71139): GuildBankFrame 750×428 (LoadOnDemand,
+-- UIPanelWindows area "doublewide" → Échap = HideUIPanel → OnHide). The seal sits on the top rail
+-- between the centred TabTitle and GuildItemSearchBox (x 605–735). Putting the peek on this side
+-- also keeps it clear of the classic Edit Mode player and target portrait positions. A click makes Li Li peek once over the
+-- frame's top edge, right above the seal; nothing else (no chat, sound, bank call, keyboard capture).
+-- Art/LiLiNote.tga (512×512 RGBA): three registered eye cels, seal x 452–507 / y 0–55.
+local NOTE_TEX='Interface\\AddOns\\LiLiBanque\\Art\\LiLiNote'
+UI.NOTE_TEX=NOTE_TEX
+UI.SEAL_COORDS={452/512,508/512,0,56/512}
+UI.PEEK_COORDS={6/512,217/512,4/512,228/512}
+local PEEK_CELS={UI.PEEK_COORDS,{230/512,441/512,4/512,228/512},{6/512,217/512,236/512,460/512}}
+UI.SEAL_POINT={530,-31} -- x 530–550, y 31–51, above the item grid
+local SEAL_IDLE,SEAL_HOVER=0.55,1
+-- Li Li lives in a clipping window (Frame:SetClipsChildren, SimpleFrameAPIDocumentation) whose bottom
+-- edge IS the frame's top edge: BOTTOMLEFT of the window on TOPLEFT of GuildBankFrame, centred on the
+-- seal. Whatever of her is below that edge is not drawn, so she really rises from behind the
+-- frame; nothing relies on frame levels. The panel manager puts a doublewide panel at TOPLEFT 16,-116
+-- (UIPanelLayoutFrame TOP_OFFSET), so 116 px are free above it; ClampUIPanelY can raise it on short
+-- screens, hence the room check before each peek. The window has no background, takes no mouse.
+-- Sprite 68×72 (211:224), anchored BOTTOM of the window at the pose offset; hidden = 74 px below.
+UI.PEEK={x=UI.SEAL_POINT[1]+10-50,w=100,h=76,spriteW=68,spriteH=72}
+-- Timeline (s), pose = sprite BOTTOM offset {x,y} in the window. Ears rise, she hesitates (small dip),
+-- pops her head out with the bitten biscuit and leans 1–2 px towards the bank (her gaze), breathes
+-- once, then ducks back fast. Total 1.56 s, then everything is hidden and the OnUpdate removed.
+local OUT,INOUT=function(u) return 1-(1-u)^3 end,function(u) return u<0.5 and 4*u^3 or 1-(-2*u+2)^3/2 end
+UI.PEEK_KEYS={
+    {0.00,0,-74,OUT},   -- start: fully behind the edge
+    {0.22,0,-46,INOUT}, -- ears and top of the head (26 px)
+    {0.36,0,-49,INOUT}, -- hesitation: a small dip
+    {0.50,0,-46,OUT},   -- back to the ears
+    {0.72,1,-1,INOUT},  -- head, biscuit and paws on the edge
+    {0.98,2,-4,INOUT},  -- leans in, breath down
+    {1.24,2,-2,INOUT},  -- breath up
+    {1.34,2,-2,INOUT},  -- last look
+    {1.56,0,-76},       -- ducked
+}
+UI.PEEK_DURATION=UI.PEEK_KEYS[#UI.PEEK_KEYS][1]
+function UI.peekPose(t)
+    local K=UI.PEEK_KEYS
+    if t<=K[1][1] then return K[1][2],K[1][3] end
+    for i=1,#K-1 do
+        local a,b=K[i],K[i+1]
+        if t<b[1] then
+            local u=a[4]((t-a[1])/(b[1]-a[1]))
+            return a[2]+(b[2]-a[2])*u,a[3]+(b[3]-a[3])*u
+        end
+    end
+    local z=K[#K]; return z[2],z[3]
+end
+local function sealHover(seal,on)
+    seal:SetAlpha(on and SEAL_HOVER or SEAL_IDLE); seal.glow:SetShown(on)
+    if on and GameTooltip then
+        -- To the right, over the rail and the title bar: the item grid stays clear.
+        GameTooltip:SetOwner(seal,'ANCHOR_RIGHT'); GameTooltip:SetText('Sceau de Li Li'); GameTooltip:Show()
+    elseif not on then leave(seal) end
+end
+function UI.buildSeal(gb)
+    local seal=CreateFrame('Button',nil,gb); seal.liliSeal=true; seal:SetSize(20,20)
+    seal:SetPoint('TOPLEFT',gb,'TOPLEFT',UI.SEAL_POINT[1],UI.SEAL_POINT[2])
+    seal:SetFrameLevel(gb:GetFrameLevel()+25) -- above the frame's art and item buttons, so it stays clickable
+    seal.icon=seal:CreateTexture(nil,'ARTWORK'); seal.icon:SetAllPoints()
+    seal.icon:SetTexture(NOTE_TEX); seal.icon:SetTexCoord(unpack(UI.SEAL_COORDS))
+    seal.glow=seal:CreateTexture(nil,'OVERLAY'); seal.glow:SetPoint('TOPLEFT',-3,3); seal.glow:SetPoint('BOTTOMRIGHT',seal,'BOTTOMRIGHT',3,-3)
+    seal.glow:SetTexture(NOTE_TEX); seal.glow:SetTexCoord(unpack(UI.SEAL_COORDS)); seal.glow:SetBlendMode('ADD'); seal.glow:SetAlpha(0.45); seal.glow:Hide()
+    seal:SetAlpha(SEAL_IDLE)
+    seal:SetScript('OnEnter',function(self) sealHover(self,true) end)
+    seal:SetScript('OnLeave',function(self) sealHover(self,false) end)
+    seal:SetScript('OnClick',function(self) sealHover(self,false); A:guard('Li Li',UI.startPeek) end)
+    UI.bankSeal=seal
+    return seal
+end
+-- No clipping API → no window at all: never show an unclipped half-Li Li over the world.
+function UI.buildPeek(gb)
+    local v=CreateFrame('Frame',nil,gb)
+    if not v.SetClipsChildren then v:Hide(); return nil end
+    v.liliPeek=true; v:SetClipsChildren(true); v:EnableMouse(false)
+    v:SetSize(UI.PEEK.w,UI.PEEK.h); v:SetPoint('BOTTOMLEFT',gb,'TOPLEFT',UI.PEEK.x,0)
+    -- Clip a child frame's regions, not a texture owned by the clipping frame itself.
+    local body=CreateFrame('Frame',nil,v); body:EnableMouse(false)
+    body:SetSize(UI.PEEK.spriteW,UI.PEEK.spriteH)
+    local s=body:CreateTexture(nil,'ARTWORK'); s:SetAllPoints()
+    s:SetTexture(NOTE_TEX)
+    v.t=0; v:Hide()
+    UI.peekViewport,UI.peekBody,UI.peekSprite=v,body,s
+    UI.placePeek(0)
+    return v
+end
+function UI.placePeek(t)
+    local body=UI.peekBody; if not body then return end
+    local x,y=UI.peekPose(t)
+    body:ClearAllPoints(); body:SetPoint('BOTTOM',UI.peekViewport,'BOTTOM',x,y)
+    local cel=t<0.92 and 1 or t<0.98 and 2 or t<1.06 and 3 or t<1.12 and 2 or 1
+    local s=UI.peekSprite
+    if s.liliCel~=cel then s:SetTexCoord(unpack(PEEK_CELS[cel])); s.liliCel=cel end
+end
+function UI.sealAllowed()
+    local gb=_G.GuildBankFrame
+    return A:active() and gb~=nil and gb.IsVisible~=nil and gb:IsVisible()==true and (gb.mode==nil or gb.mode=='bank')
+end
+-- Screen room above the frame (GetTop is in each frame's own units, × effective scale = screen).
+function UI.peekRoom()
+    local gb=_G.GuildBankFrame
+    local top,gt=UIParent and UIParent:GetTop(),gb and gb:GetTop()
+    if not top or not gt then return false end
+    local gs=gb:GetEffectiveScale()
+    return top*UIParent:GetEffectiveScale()-gt*gs>=UI.PEEK.h*gs
+end
+function UI.peekPlaying() return UI.peeking==true end
+local function peekStep(v,elapsed)
+    v.t=v.t+(elapsed or 0)
+    if v.t>=UI.PEEK_DURATION then UI.stopPeek() else UI.placePeek(v.t) end
+end
+local function peekUpdate(v,elapsed) A:guard('Li Li',peekStep,v,elapsed) end
+function UI.startPeek()
+    local v=UI.peekViewport
+    if not v or UI.peeking or not UI.sealAllowed() or not UI.peekRoom() then return end
+    UI.peeking=true; v.t=0; UI.placePeek(0)
+    v:Show(); v:SetScript('OnUpdate',peekUpdate) -- the only ticker, removed when she is gone
+end
+function UI.stopPeek()
+    UI.peeking=false
+    local v=UI.peekViewport; if not v then return end
+    v:SetScript('OnUpdate',nil); v:Hide(); v.t=0; UI.placePeek(0)
+end
+
 ---------------------------------------------------------------- Guild bank status line
 function UI.attach()
     local gb=_G.GuildBankFrame; if not gb then return end
     if not UI.bankLine then
         local b=CreateFrame('Frame',nil,gb)
-        b:SetPoint('TOPLEFT',gb,'BOTTOMLEFT',0,-2); b:SetPoint('TOPRIGHT',gb,'BOTTOMRIGHT',0,-2); b:SetHeight(24)
+        -- Forever places the native mode tabs' bottom edge 30 px below GuildBankFrame.
+        b:SetPoint('TOPLEFT',gb,'BOTTOMLEFT',0,-36); b:SetPoint('TOPRIGHT',gb,'BOTTOMRIGHT',0,-36); b:SetHeight(24)
         local bg=b:CreateTexture(nil,'BACKGROUND'); bg:SetAllPoints(); bg:SetColorTexture(0,0,0,0.8)
-        local t=text(b,'GameFontHighlight'); t:SetPoint('LEFT',10,0); t:SetPoint('RIGHT',b,'RIGHT',-80,0)
         local open=CreateFrame('Button',nil,b,'UIPanelButtonTemplate'); open:SetSize(70,20); open:SetPoint('RIGHT',-2,0)
         open:SetText('/lili'); open:SetScript('OnClick',function() A:guard('/lili',UI.toggle) end)
-        UI.bankLine,UI.bankText=b,t
+        local t=text(b,'GameFontHighlight'); t:SetPoint('LEFT',10,0); t:SetPoint('RIGHT',open,'LEFT',-6,0)
+        UI.buildSeal(gb); UI.buildPeek(gb)
+        -- Created once with the bar, so a second visit adds no hook. Post-hooks only: nothing protected.
+        local put=function() A:guard('Li Li',UI.stopPeek) end
+        gb:HookScript('OnHide',put)
+        for _,tab in ipairs(gb.Tabs or {}) do if tab.HookScript then tab:HookScript('OnClick',put) end end
+        for _,tab in ipairs(gb.BankTabs or {}) do
+            if tab.Button and tab.Button.HookScript then tab.Button:HookScript('OnClick',put) end
+        end
+        UI.bankLine,UI.bankText,UI.bankOpenButton=b,t,open
     end
     UI.refreshBankLine()
 end
@@ -693,4 +829,9 @@ function UI.bankLineText()
 end
 function UI.refreshBankLine()
     if UI.bankText then UI.bankText:SetText(UI.bankLineText()) end
+    if UI.bankSeal then
+        local ok=A:active()
+        UI.bankSeal:SetShown(ok)
+        if not ok then UI.stopPeek() end
+    end
 end

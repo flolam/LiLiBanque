@@ -6,8 +6,8 @@ Region.__index = Region
 local function proto(parent)
     local p = setmetatable({}, {__index = parent}); p.__index = p; return p
 end
-local Frame, Button, EditBox, ScrollFrame, FontString, Texture
-Frame = proto(Region); Button = proto(Frame); EditBox = proto(Frame); ScrollFrame = proto(Frame)
+local Frame, Button, CheckButton, EditBox, ScrollFrame, FontString, Texture
+Frame = proto(Region); Button = proto(Frame); CheckButton = proto(Button); EditBox = proto(Frame); ScrollFrame = proto(Frame)
 FontString = proto(Region); Texture = proto(Region)
 
 function Region:SetPoint(point, rel, relPoint, x, y)
@@ -28,6 +28,8 @@ function Region:Show() if not self.shown then self.shown = true; if self.fire th
 function Region:Hide() if self.shown then self.shown = false; if self.fire then self:fire('OnHide') end end end
 function Region:SetShown(v) if v then self:Show() else self:Hide() end end
 function Region:GetParent() return self.parent end
+function Region:SetAlpha(a) assert(type(a) == 'number' and a >= 0 and a <= 1, 'alpha hors limites'); self.alpha = a end
+function Region:GetAlpha() return self.alpha or 1 end
 
 function FontString:SetText(t) self.text = t end
 function FontString:GetText() return self.text end
@@ -38,6 +40,9 @@ function Texture:SetColorTexture(r, g, b, a) self.color = {r, g, b, a}; self.tex
 function Texture:SetTexture(t) self.texture = t; self.color = nil end
 function Texture:GetTexture() return self.texture end
 function Texture:SetTexCoord(...) self.texCoord = {...} end
+-- AlphaMode values accepted by Texture:SetBlendMode (BLEND, ADD, MOD, ALPHAKEY, DISABLE).
+local BLEND = {BLEND = true, ADD = true, MOD = true, ALPHAKEY = true, DISABLE = true}
+function Texture:SetBlendMode(m) assert(BLEND[m], 'mode de fusion inconnu : '..tostring(m)); self.blend = m end
 
 function Frame:SetScript(name, fn) self.scripts[name] = fn end
 function Frame:GetScript(name) return self.scripts[name] end
@@ -69,7 +74,47 @@ function Frame:StartMoving() self.moving = true end
 function Frame:StopMovingOrSizing() self.moving = false end
 function Frame:SetToplevel(v) self.toplevel = v end
 function Frame:SetID(id) self.id = id end
+function Frame:SetFrameLevel(n) self.level = n end
+function Frame:GetFrameLevel() return self.level or (self.parent and self.parent.GetFrameLevel and self.parent:GetFrameLevel() + 1) or 0 end
 function Frame:GetID() return self.id end
+-- SimpleFrameAPIDocumentation (Forever d9c22e32): SetClipsChildren(clipsChildren: bool) / DoesClipChildren.
+function Frame:SetClipsChildren(v) assert(type(v) == 'boolean', 'SetClipsChildren attend un booléen'); self.clips = v end
+function Frame:DoesClipChildren() return self.clips == true end
+-- Layout: only frames whose top the mock knows (UIParent, GuildBankFrame) answer; units are the
+-- frame's own (×GetEffectiveScale = screen), as in ScriptRegion GetTop.
+function Region:GetTop() return self.top end
+function Region:GetEffectiveScale() return self.scale or (self.parent and self.parent:GetEffectiveScale()) or 1 end
+-- SimpleAnimatableObject / SimpleAnimGroup / SimpleAnim / SimpleAnimAlpha / SimpleAnimTranslation
+-- (Blizzard_APIDocumentationGenerated, Forever d9c22e32): only the methods listed there.
+local AnimGroup, Anim = {}, {}; AnimGroup.__index = AnimGroup; Anim.__index = Anim
+local ANIM_TYPES = {Alpha = true, Translation = true, Scale = true, Rotation = true, Path = true, FlipBook = true,
+    VertexColor = true, TextureCoordTranslation = true, Animation = true}
+local SMOOTHING = {NONE = true, IN = true, OUT = true, IN_OUT = true} -- smoothing="" values in the shipped XML
+local LOOP = {NONE = true, REPEAT = true, BOUNCE = true}
+function Frame:CreateAnimationGroup(name, template)
+    assert(template == nil, 'gabarit d’animation non simulé')
+    local g = setmetatable({parent = self, anims = {}, playing = false}, AnimGroup)
+    M.animGroups[#M.animGroups + 1] = g; return g
+end
+function AnimGroup:CreateAnimation(kind)
+    assert(ANIM_TYPES[kind], 'type d’animation inconnu : '..tostring(kind))
+    local a = setmetatable({type = kind, group = self, duration = 0, smoothing = 'NONE'}, Anim)
+    if kind ~= 'Alpha' then a.SetFromAlpha, a.SetToAlpha = false, false end
+    if kind ~= 'Translation' then a.SetOffset = false end
+    self.anims[#self.anims + 1] = a; return a
+end
+function AnimGroup:Play(reverse) self.playing = true; M.animPlays[#M.animPlays + 1] = {group = self, reverse = reverse == true} end
+function AnimGroup:Stop() self.playing = false end
+function AnimGroup:IsPlaying() return self.playing end
+function AnimGroup:SetLooping(l) assert(LOOP[l], 'boucle inconnue : '..tostring(l)); self.looping = l end
+function AnimGroup:SetToFinalAlpha(v) self.finalAlpha = v end
+function AnimGroup:GetAnimations() return unpack(self.anims) end
+function Anim:SetDuration(d) assert(type(d) == 'number' and d >= 0); self.duration = d end
+function Anim:SetSmoothing(w) assert(SMOOTHING[w], 'lissage inconnu : '..tostring(w)); self.smoothing = w end
+function Anim:SetOrder(n) self.order = n end
+function Anim:SetFromAlpha(a) assert(a >= 0 and a <= 1); self.from = a end
+function Anim:SetToAlpha(a) assert(a >= 0 and a <= 1); self.to = a end
+function Anim:SetOffset(x, y) self.x, self.y = x, y end
 function Frame:IsVisible()
     local f = self
     while f do if not f.shown then return false end; f = f.parent end
@@ -94,7 +139,7 @@ function EditBox:SetCursorPosition(n) self.cursor = n end
 function EditBox:SetFontObject(f) assert(M.fonts[f], 'police absente : '..tostring(f)); self.fontObject = f end
 function EditBox:type(t) self.text = t; self:fire('OnTextChanged', true) end
 
-local kinds = {Frame = Frame, Button = Button, EditBox = EditBox, ScrollFrame = ScrollFrame}
+local kinds = {Frame = Frame, Button = Button, CheckButton = CheckButton, EditBox = EditBox, ScrollFrame = ScrollFrame}
 local function new(kind, name, parent, template)
     local mt = assert(kinds[kind], 'unknown widget type '..tostring(kind))
     local o = setmetatable({kind = kind, name = name, parent = parent, template = template, scripts = {}, hooks = {}, events = {}, shown = true}, mt)
@@ -119,8 +164,8 @@ end
 M.templates = {UIPanelCloseButtonDefaultAnchors = true, UIPanelButtonTemplate = true, BasicFrameTemplate = true, ButtonFrameTemplate = true, InputScrollFrameTemplate = true, PanelTabButtonTemplate = true}
 
 function M.install()
-    M.all = {}; M.textures = {}
-    UIParent = new('Frame', 'UIParent'); UISpecialFrames = {}
+    M.all = {}; M.textures = {}; M.animGroups = {}; M.animPlays = {}
+    UIParent = new('Frame', 'UIParent'); UIParent.top = 768; UIParent.scale = 1; UISpecialFrames = {}
     -- GameTooltip (Blizzard_GameTooltip): only the widget methods the addon may call.
     M.tooltip = {shown = false}
     GameTooltip = {
@@ -173,9 +218,31 @@ end
 -- Simulates LoadAddOn('Blizzard_GuildBankUI') from the PlayerInteractionManager.
 function M.loadGuildBank()
     local f = new('Frame', 'GuildBankFrame', UIParent, 'BasicFrameTemplate')
-    f:SetSize(750, 428); f.shown = false
+    f:SetSize(750, 428); f.shown = false -- mode stays nil until a native tab is clicked (coffre.lua relies on it)
+    -- UIPanelWindows.GuildBankFrame area 'doublewide' → TOPLEFT UIParent 16,-116 (UIPanelLayoutFrame TOP_OFFSET).
+    f.top = UIParent.top - 116
+    -- Bottom tabs of Blizzard_GuildBankUI/Mainline/Blizzard_GuildBankUI.xml (Forever d9c22e32):
+    -- GuildBankFrameTab1..4 (PanelTabButtonTemplate → parentArray Tabs), Tab1 BOTTOMLEFT 7,-30,
+    -- the next ones TOPLEFT of the previous TOPRIGHT +3 (PanelTemplates_AnchorTabs), maxTabWidth 128.
+    for i = 1, 4 do
+        local tab = new('Button', 'GuildBankFrameTab'..i, f, 'PanelTabButtonTemplate'); tab:SetID(i); tab:SetSize(128, 32)
+        if i == 1 then tab:SetPoint('BOTTOMLEFT', f, 'BOTTOMLEFT', 7, -30) else tab:SetPoint('TOPLEFT', f.Tabs[i - 1], 'TOPRIGHT', 3, 0) end
+        tab:SetScript('OnClick', function(self) f.mode = self:GetID() == 1 and 'bank' or 'log' end)
+    end
+    -- Item tabs GuildBankTab1..8 (GuildBankTabTemplate, parentArray BankTabs) with their CheckButton .Button.
+    f.BankTabs = {}
+    for i = 1, 8 do
+        local t = new('Frame', 'GuildBankTab'..i, f); t:SetID(i); f.BankTabs[i] = t
+        t.Button = new('CheckButton', nil, t); t.Button:SetScript('OnClick', function() M.currentTab = i end)
+    end
     M.loaded.Blizzard_GuildBankUI = true
     return f
+end
+-- One rendered frame: OnUpdate(self, elapsed) runs only on visible frames, like the client.
+function M.tick(dt)
+    local list = {}
+    for _, o in ipairs(M.all) do if o.scripts and o.scripts.OnUpdate and o:IsVisible() then list[#list + 1] = o end end
+    for _, o in ipairs(list) do if o.scripts.OnUpdate and o:IsVisible() then o.scripts.OnUpdate(o, dt) end end
 end
 function M.find(pred) for _, o in ipairs(M.all) do if pred(o) then return o end end end
 function M.texts(frame)
@@ -187,4 +254,5 @@ function M.texts(frame)
     end
     return table.concat(out, '\n')
 end
+M.Frame = Frame
 return M
