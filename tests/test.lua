@@ -42,6 +42,24 @@ test('transport découpe et réassemble sans exécuter de Lua',function()
  local values=W.unpack(out); eq(values[5],'Brenø Nom'); eq(values[11],string.rep('é;%',300))
  eq(rx:push('Mage','garbage',1),nil)
 end)
+test('paquet lent accepté si chaque fragment apporte du progrès avant 120 s',function()
+ local W=LiLiBanque.Wire; local rx=W.receiver(); local payload=string.rep('A',410)
+ local chunks=W.chunks(payload,'lent'); eq(#chunks,3)
+ eq(rx:push('Orin Fictif',chunks[1],0),nil)
+ eq(rx:push('Orin Fictif',chunks[2],110),nil)
+ eq(rx:push('Orin Fictif',chunks[3],220),payload)
+end)
+test('doublons sans progrès ne prolongent pas les fragments bloqués',function()
+ local W=LiLiBanque.Wire; local rx=W.receiver(); local payload=string.rep('B',210)
+ local chunks=W.chunks(payload,'bloque'); eq(#chunks,2)
+ eq(rx:push('Orin Fictif',chunks[1],0),nil)
+ eq(rx:push('Orin Fictif',chunks[1],110),nil)
+ eq(rx:push('Orin Fictif',chunks[2],121),nil)
+ -- The same sender can still start and finish a fresh packet.
+ local fresh=W.chunks(payload,'frais')
+ eq(rx:push('Orin Fictif',fresh[1],122),nil)
+ eq(rx:push('Orin Fictif',fresh[2],123),payload)
+end)
 test('file de débit conserve lockdown et throttle puis reprend',function()
  local W=LiLiBanque.Wire; local result=11; local calls=0
  local q=W.queue(function(msg) calls=calls+1; return result end)
@@ -270,7 +288,7 @@ test('événements WoW réels simulés : banque, roster, recrues et UI',function
 end)
 test('chargement unique : message de version une fois, /lili et /lilibanque',function()
  local A=loadAddon(); fire('PLAYER_LOGIN')
- eq(#CHAT,1); assert(CHAT[1]:find('version 1.3.0 chargée — /lili',1,true),CHAT[1])
+ eq(#CHAT,1); assert(CHAT[1]:find('version '..LiLiBanque.Core.VERSION..' chargée — /lili',1,true),CHAT[1])
  eq(SLASH_LILIBANQUE1,'/lili'); eq(SLASH_LILIBANQUE2,'/lilibanque')
  SlashCmdList.LILIBANQUE(''); assert(LiLiBanqueFrame:IsShown(),'fenêtre ouverte par /lili')
  SlashCmdList.LILIBANQUE('  '); assert(not LiLiBanqueFrame:IsShown(),'second /lili referme')
@@ -348,7 +366,7 @@ test('erreur Lua capturée : message en jeu et détail dans /lili diag',function
  eq(LiLiBanqueState.lastError.where,'GUILDBANKLOG_UPDATE')
  CHAT={}; SlashCmdList.LILIBANQUE('diag')
  local line=chat('Dernière erreur Lua : '); assert(line and line:find('boom de test',1,true) and line:find('[GUILDBANKLOG_UPDATE]',1,true),tostring(line))
- assert(chat('LiLiBanque 1.3.0 ; client 1.60.1 (71091), interface 16001'))
+ assert(chat('LiLiBanque '..LiLiBanque.Core.VERSION..' ; client 1.60.1 (71091), interface 16001'))
  assert(chat('Banque ouverte : oui (signal : événement) ; GuildBankFrame : chargé, affiché ; Blizzard_GuildBankUI chargé : oui ; onglets achetés : 1'))
  assert(chat('Notes d’officier lisibles : oui'))
  -- Errors survive a /reload through the per-character state.
@@ -366,15 +384,16 @@ test('fenêtre /lili : Échap, déplacement mémorisé, rendu des mouvements et 
  local f=LiLiBanqueFrame; assert(f:IsShown()); eq(f.template,'ButtonFrameTemplate'); eq(f.title,'La Bande à Li Li'); eq(f.portrait,false)
  assert(f.movable and f.clamped and f.toplevel); eq(f.drag,'LeftButton')
  local found=false; for _,n in ipairs(UISpecialFrames) do if n=='LiLiBanqueFrame' then found=true end end; assert(found,'Échap')
- eq(f.Tabs,nil) -- one section: no tab bar
+ eq(#f.Tabs,2); eq(f.Tabs[1].text,'Journal'); eq(f.Tabs[2].text,'Coffre'); eq(f.selectedTab,1) -- Journal first, native tabs
  local UI=LiLiBanque.UI; local panel=UI.sections[1].panel
  local r=panel.rows[1]
  eq(r.name.text,'|cfff48cbaBrenø Nom|r'); eq(r.amount.text,'4 po'); eq(r.kind.text,'dépôt'); eq(r.ago.text,'il y a 1 h')
  eq(panel.rows[3].name.text,'')
  assert(panel.values.scan.text:find('2 nouvelles lignes',1,true),panel.values.scan.text)
  assert(panel.values.money.text:find('8 po',1,true)); eq(panel.values.gaps.text,'aucun')
- assert(panel.values.sync.text:find('file',1,true))
- eq(panel.hint.text,'Le fichier pour le site n’est écrit qu’au /reload ou à la déconnexion.')
+ assert(panel.values.sync.text~='' and not panel.values.sync.text:find('file',1,true))
+ assert(table.concat(A:diagLines(),'\n'):find('file ',1,true))
+ eq(panel.hint.text,'Fichier WoW mis à jour au /reload ou à la déconnexion.')
  assert(UI.scanButton:IsEnabled()); fire('GUILDBANKFRAME_CLOSED'); update(1); assert(not UI.scanButton:IsEnabled(),'Relever grisé banque fermée')
  fire('GUILDBANKFRAME_OPENED'); update(1); assert(UI.scanButton:IsEnabled()); NOW=NOW+60; UI.scanButton:Click(); eq(A.pending,true)
  -- Withdrawal row, class colour by first name, gaps line.
@@ -395,13 +414,14 @@ test('fenêtre /lili : Échap, déplacement mémorisé, rendu des mouvements et 
  assert(LiLiBanque.UI.sections[1].panel.values.scan.text:find('guilde lue « Autre »',1,true))
  assert(not LiLiBanque.UI.exportButton:IsEnabled())
 end)
-test('sections déclarées dans une table : onglets seulement à partir de deux',function()
+test('sections déclarées dans une table : un onglet natif par section',function()
  loadAddon(); fire('PLAYER_LOGIN')
  local built,refreshed=0,0
  LiLiBanque.UI.addSection({key='autre',title='Autre outil',build=function(p) built=built+1 end,refresh=function() refreshed=refreshed+1 end})
  SlashCmdList.LILIBANQUE('')
- local f=LiLiBanqueFrame; eq(#f.Tabs,2); eq(f.numTabs,2); eq(f.Tabs[2].text,'Autre outil'); eq(built,1)
- f.Tabs[2]:Click(); eq(f.selectedTab,2); assert(LiLiBanque.UI.sections[2].panel:IsShown()); assert(not LiLiBanque.UI.sections[1].panel:IsShown())
+ local f=LiLiBanqueFrame; eq(#f.Tabs,3); eq(f.numTabs,3); eq(f.Tabs[3].text,'Autre outil'); eq(built,1)
+ f.Tabs[3]:Click(); eq(f.selectedTab,3); assert(LiLiBanque.UI.sections[3].panel:IsShown()); assert(not LiLiBanque.UI.sections[1].panel:IsShown())
+ assert(not LiLiBanque.UI.sections[2].panel:IsShown())
  assert(refreshed>0); eq(LiLiBanque.UI.header.text,'Autre outil')
 end)
 
@@ -442,7 +462,8 @@ test('officiers vus par la synchro affichés par leur nom applicatif',function()
  peer:hello(); for _=1,10 do peer.q:tick(NOW,false); NOW=NOW+1 end
  for _,m in ipairs(out) do fire('CHAT_MSG_ADDON','LiLiBanque1',m,'OFFICER','Magor-Barbefer-CAMWOWEU4Realm7PvP') end
  assert(A.sync.seen['Magor Barbefer']); SlashCmdList.LILIBANQUE('')
- assert(LiLiBanque.UI.sections[1].panel.values.sync.text:find('vus : Magor Barbefer',1,true),LiLiBanque.UI.sections[1].panel.values.sync.text)
+ local seen=LiLiBanque.UI.sections[1].panel.values.peers.text
+ assert(seen:find('vus : Magor Barbefer',1,true),seen)
 end)
 test('solde relevé même lorsque le journal est refusé',function()
  local A=loadAddon(); QueryGuildBankLog=function() error('refusé') end
@@ -552,7 +573,7 @@ end)
 test('export depuis la fenêtre : zone de texte remplie, sélectionnée, en lecture seule',function()
  local A=loadAddon(); fire('PLAYER_LOGIN'); GuildBankFrame=MOCK.loadGuildBank(); GuildBankFrame:Show(); fire('GUILDBANKFRAME_OPENED'); fire('GUILDBANKLOG_UPDATE')
  SlashCmdList.LILIBANQUE(''); local UI=LiLiBanque.UI
- eq(UI.exportButton.text,'Exporter'); UI.exportButton:Click()
+ eq(UI.exportButton.text,'Exporter…'); UI.exportButton:Click()
  local p=UI.exportPanel; assert(p:IsShown()); assert(not UI.sections[1].panel:IsShown()); eq(p.hint.text,'Préparation de l’export…')
  eq(UI.exportButton.text,'Retour'); assert(not UI.scanButton:IsShown())
  local frames=0; while UI.job and frames<1000 do p:fire('OnUpdate',0.016); frames=frames+1 end
@@ -647,6 +668,33 @@ test('synchro partage chaque relevé réussi, même sans nouvelle ligne, et born
  for _,m in ipairs(fragments) do rx:receive(m,'OFFICER',A.name) end
  eq(LiLiBanque.Core.bankScanTime(empty,se,NOW),r.seenAt)
 end)
+test('relevé prioritaire regroupé après le paquet en cours malgré une file pleine',function()
+ local net=network({'Orin Fictif','Velka Fictive','Soren Fictif'})
+ local tx=net.peers[1].sync; local sent=tx.q.send; local calls,result=0,0
+ tx.q.send=function(m) calls=calls+1; if result~=0 then return result end; return sent(m) end
+ local function tick(at,locked)
+  net.now=at; tx.q:tick(at,locked)
+  for _,m in ipairs(net.messages) do
+   for i=2,3 do net.peers[i].sync:receive(m.msg,'OFFICER',net.peers[1].name) end
+  end
+  local msg=net.messages[1] and net.messages[1].msg; net.messages={}; return msg
+ end
+ tx:packet('I',net.peers[2].name,'ledger',{string.rep('A',410)})
+ for _=4,2048 do tx:packet('I',net.peers[2].name,'ledger',{'exemple'}) end
+ eq(tx.q:size(),2048)
+ local first=tick(0):match('^1|([^|]+)|1|3|'); assert(first)
+ for at=199991,200000 do tx.state.bankScanAt=at; tx:bankScan() end
+ eq(tick(0.1),nil); eq(tick(1,true),nil); eq(calls,1)
+ result=8; eq(tick(3),nil); eq(calls,2)
+ result=0; eq(tick(7.9),nil); eq(calls,2)
+ assert(tick(8):find('1|'..first..'|2|3|',1,true)==1)
+ assert(tick(9):find('1|'..first..'|3|3|',1,true)==1)
+ eq(tick(9.1),nil)
+ tick(10)
+ for i=2,3 do eq(net.peers[i].state.bankScanAt,200000) end
+ eq(tx.q:size(),2045) -- the remaining bulk was neither dropped nor padded with stale B packets
+ assert(tick(11):find('|1|1|I;',1,true))
+end)
 test('op B bornée : valeurs hostiles, futur, champs et canal, sans changer le contrat',function()
  local A=loadAddon(); fire('PLAYER_LOGIN'); local W=LiLiBanque.Wire; local serial=0
  local function send(value,opts)
@@ -723,7 +771,31 @@ test('rotation après mise à jour : date du dernier succès, pas première obse
  GetGuildBankMoneyTransaction=function() return 'deposit','Lunor Brumebleue',60000,0,0,0,0 end
  A:scanNow(); fire('GUILDBANKLOG_UPDATE'); eq(A.state.lastGap.from,previous)
 end)
-test('coffre : onglets visibles en série, relevé complet, chat et état',function()
+local function confirmEmpty()
+ update(1); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
+end
+test('coffre auto : un mouvement dans l’onglet affiché ne dépend pas des onglets non visités',function()
+ local A=loadAddon()
+ local switches=0; SetCurrentGuildBankTab=function() switches=switches+1 end
+ local slot={item='item:2318',count=20,name='Light Leather',quality=1}
+ MOCK.tabs[1].slots[3]=slot
+ MOCK.tabs[2]={name='Deux',icon=133784,viewable=true,slots={}}
+ MOCK.tabs[3]={name='Trois',icon=133784,viewable=true,slots={}}
+ GetNumGuildBankTabs=function() return #MOCK.tabs end
+ fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); update(1)
+ fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
+ local old=A.db.stock[1]; eq(old.slots[3].count,20)
+ update(1) -- under the old scheduling, tab 2 starts blocking the scan here
+ slot.count=12
+ fire('GUILDBANKBAGSLOTS_CHANGED'); update(1)
+ eq(A.db.stock[1],old) -- the move itself must not count as a post-query response
+ fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
+ eq(A.db.stock[1].slots[3].count,12) -- no addon command, no waiting for the other tabs
+ eq(A.db.stock[2],nil); eq(A.db.stock[3],nil)
+ eq(#MOCK.queries,2); eq(MOCK.queries[1].tab,1); eq(MOCK.queries[2].tab,1)
+ eq(switches,0); eq(MOCK.currentTab,1); SetCurrentGuildBankTab=nil
+end)
+test('coffre : onglets affichés successivement, relevé complet, chat et état',function()
  local A=loadAddon()
  MOCK.tabs[1].slots[3]={item='item:2318::::::::60:::::::::',count=20,name='Light Leather',quality=1}
  MOCK.tabs[2]={name='Potions',icon=134712,viewable=true,slots={}}
@@ -738,7 +810,9 @@ test('coffre : onglets visibles en série, relevé complet, chat et état',funct
  update(1); eq(#MOCK.queries,2); eq(MOCK.queries[2].tab,2)
  assert(MOCK.queries[2].at-MOCK.queries[1].at>=1)
  fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
- eq(count(A.db.stock[2].slots),0); assert(chat('Coffre : 2 onglets, 20 objets'))
+ eq(A.db.stock[2],nil); confirmEmpty()
+ eq(count(A.db.stock[2].slots),0)
+ assert(chat('Coffre : 1 onglet, 20 objets')); eq(chat('Coffre : 1 onglet, 0 objets'),nil)
  fire('GUILDBANKLOG_UPDATE'); eq(count(A.db.ledger),2) -- journal d’or inchangé
  SlashCmdList.LILIBANQUE(''); assert(LiLiBanque.UI.sections[1].panel.values.stock.text:find('2 onglets, 20 objets',1,true))
  CHAT={}; SlashCmdList.LILIBANQUE('diag')
@@ -769,12 +843,12 @@ test('coffre : fermeture annule la file, réouverture et achat relancent le rele
  eq(A.stockScan,nil); eq(A.stockDue,nil)
  fire('GUILDBANKBAGSLOTS_CHANGED'); update(20); eq(#MOCK.queries,1); eq(count(A.db.stock),0)
  fire('GUILDBANKFRAME_OPENED'); update(1); eq(#MOCK.queries,2)
- fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); assert(A.db.stock[1])
+ fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); confirmEmpty(); assert(A.db.stock[1])
  MOCK.tabs[2]={name='Nouveau',icon=133784,viewable=true,slots={}}
  GetNumGuildBankTabs=function() return #MOCK.tabs end
- fire('GUILDBANK_UPDATE_TABS'); update(1); update(1); eq(#MOCK.queries,3)
+ fire('GUILDBANK_UPDATE_TABS'); update(1); update(1); eq(#MOCK.queries,4)
  fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); MOCK.currentTab=2; update(1)
- eq(MOCK.queries[4].tab,2); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
+ eq(MOCK.queries[5].tab,2); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); confirmEmpty()
  assert(A.db.stock[2]); eq(A.stockVisible,2)
 end)
 test('coffre : lien retardé, relevé atomique et suffixe aléatoire conservé',function()
@@ -809,7 +883,7 @@ test('coffre : mouvements débouncés, suppression et onglet vide remplacent le 
  update(1); eq(#MOCK.queries,3) -- second independent query, then its own response
  fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
  eq(count(A.db.stock[1].slots),0); assert(A.db.stock[1].scannedAt>old.scannedAt)
- assert(chat('Coffre : 1 onglet, 0 objets')); eq(A.stockScan,nil)
+ eq(A:stockText(),'Coffre : 1 onglet, 0 objets'); eq(chat('Coffre : 1 onglet, 0 objets'),nil); eq(A.stockScan,nil)
  update(5); eq(#MOCK.queries,3) -- no response-induced scan loop
 end)
 test('coffre : onglet invisible préservé, rang sans droits et zéro onglet expliqués',function()
@@ -820,16 +894,16 @@ test('coffre : onglet invisible préservé, rang sans droits et zéro onglet exp
  GetNumGuildBankTabs=function() return #MOCK.tabs end
  C_GuildInfo.CanViewOfficerNote=function() return false end
  fire('GUILDBANKFRAME_OPENED'); update(1); eq(#MOCK.queries,1); eq(MOCK.queries[1].tab,1)
- fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
+ fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); confirmEmpty(); eq(#MOCK.queries,2)
  eq(A.db.stock[2],old); assert(A.db.stock[1]); eq(A.stockVisible,1)
  fire('GUILDBANKFRAME_CLOSED'); MOCK.tabs[1].viewable=false; CHAT={}
  fire('GUILDBANKFRAME_OPENED'); update(1)
- eq(#MOCK.queries,1); assert(chat('Coffre : aucun onglet visible pour ce rang')); eq(A.db.stock[2],old)
+ eq(#MOCK.queries,2); assert(chat('Coffre : aucun onglet visible pour ce rang')); eq(A.db.stock[2],old)
  fire('GUILDBANKFRAME_CLOSED'); MOCK.tabs={}; CHAT={}
  fire('GUILDBANKFRAME_OPENED'); update(1)
- assert(chat('Coffre : aucun onglet acheté')); eq(#MOCK.queries,1); eq(A.db.stock[2],old)
+ assert(chat('Coffre : aucun onglet acheté')); eq(#MOCK.queries,2); eq(A.db.stock[2],old)
 end)
-test('coffre : cache incomplet ou réponse absente garde le précédent et libère la file',function()
+test('coffre : cache incomplet ou réponse absente garde le précédent sans bloquer le prochain onglet',function()
  for _,mode in ipairs({'link','silence','error','secret','permission'}) do
   local A=loadAddon(); fire('PLAYER_LOGIN')
   local old={name='Ancien',icon=133784,scannedAt=100000,scannedBy='Inventé',slots={}}
@@ -852,8 +926,11 @@ test('coffre : cache incomplet ou réponse absente garde le précédent et libè
   if mode~='silence' then fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5) end
   update(11); MOCK.currentTab=2; update(1)
   eq(A.db.stock[1],old); eq(MOCK.queries[#MOCK.queries].tab,2)
-  fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
-  assert(A.db.stock[2]); eq(A.stockScan,nil); assert(chat('Coffre : 1 onglet, 0 objets — onglet 1'))
+  local reason=({link='objet pas encore chargé',silence='données non reçues',error='emplacements illisibles',
+    secret='emplacements masqués',permission='relevé refusé par le jeu'})[mode]
+  assert(chat('Coffre : '..reason))
+  fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); confirmEmpty()
+  assert(A.db.stock[2]); eq(A.stockScan,nil); assert(chat('Coffre : 1 onglet, 0 objets'))
  end
 end)
 test('coffre : méta retardée et droits modifiés pendant le relevé',function()
@@ -862,12 +939,12 @@ test('coffre : méta retardée et droits modifiés pendant le relevé',function(
  eq(#MOCK.queries,0); eq(count(A.db.stock),0)
  GetGuildBankTabInfo=info; update(1); eq(#MOCK.queries,1)
  MOCK.tabs[1].viewable=false; fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); update(10)
- eq(count(A.db.stock),0); assert(chat('Coffre : onglet 1 non visible pour ce rang'))
+ eq(count(A.db.stock),0); assert(chat('Coffre : onglet non visible pour ce rang'))
  fire('GUILDBANKFRAME_CLOSED'); GetGuildBankTabInfo=function() return nil end; CHAT={}
  fire('GUILDBANKFRAME_OPENED'); update(1); update(10)
  assert(chat('Coffre : droits ou onglets pas encore reçus après 10 s'))
 end)
-test('coffre : aucune donnée de stock sur le canal OFFICER',function()
+test('coffre : aucun stock OFFICER sans politique explicite, opération D/stock ignorée',function()
  local net=network({'Zelvor','Mage'}); net:scan(1,1,100000)
  net.peers[1].db.stock={[1]={name='Coffre secret inventé',icon=133784,scannedAt=100000,scannedBy='Zelvor',slots={}}}
  net:exchange()
@@ -886,34 +963,35 @@ test('coffre : mouvement dans un onglet déjà lu pendant la réponse d’un aut
  fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
  eq(A.db.stock[1].slots[3].count,20); eq(A.db.stock[2],nil)
  MOCK.currentTab=2; update(1) -- fresh selected query after the selection changed
- fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); assert(A.db.stock[2])
- MOCK.currentTab=1; update(1); update(1) -- refresh requested by the movement
+ eq(#MOCK.queries,3); eq(MOCK.queries[3].tab,2)
+ fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); confirmEmpty(); assert(A.db.stock[2])
+ MOCK.currentTab=1; update(1); eq(MOCK.queries[5].tab,1)
  fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); update(1)
+ eq(A.db.stock[1].slots[3].count,20); eq(MOCK.queries[6].tab,1)
  fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5) -- second empty confirmation
- MOCK.currentTab=2; update(1); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
- eq(count(A.db.stock[1].slots),0); assert(chat('Coffre : 2 onglets, 0 objets'))
+ eq(count(A.db.stock[1].slots),0); eq(A:stockText(),'Coffre : 2 onglets, 0 objets')
  local queries=#MOCK.queries; update(5); eq(#MOCK.queries,queries)
 end)
-test('coffre : bouton Relever relance aussi les objets et version 1.3.0',function()
- local A=loadAddon(); eq(LiLiBanque.Core.VERSION,'1.3.0')
- fire('PLAYER_LOGIN'); eq(A.db.addonVersion,'1.3.0')
+test('coffre : bouton Relever relance aussi les objets et enregistre la version',function()
+ local A=loadAddon()
+ fire('PLAYER_LOGIN'); eq(A.db.addonVersion,LiLiBanque.Core.VERSION)
  fire('GUILDBANKFRAME_OPENED'); update(1); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
  eq(#MOCK.queries,1); A:scanNow(); update(1); eq(#MOCK.queries,2)
  SlashCmdList.LILIBANQUE(''); local _,_,_,_,y=LiLiBanque.UI.sections[1].panel.empty:GetPoint(1)
- eq(y,-198)
+ eq(y,-22)
 end)
 test('coffre : icône chemin résolue en fileID, guilde tardive et reset en cours',function()
  local A=loadAddon(); MOCK.tabs[1].icon='Interface\\Icons\\INV_Misc_QuestionMark'
  GetFileIDFromPath=function(path) eq(path,MOCK.tabs[1].icon); return 134400 end
  fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); update(1)
- fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
+ fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); confirmEmpty()
  eq(A.db.stock[1].icon,134400)
  A=loadAddon(); local guild=GetGuildInfo; GetGuildInfo=function() return nil end
  fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); update(1); eq(#MOCK.queries,0)
  GetGuildInfo=guild; update(5); update(1); eq(#MOCK.queries,1)
  A:command('reset'); A:command('reset CONFIRMER'); update(1)
  eq(#MOCK.queries,2); eq(count(A.db.stock),0)
- fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); assert(A.db.stock[1])
+ fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); confirmEmpty(); assert(A.db.stock[1])
 end)
 test('coffre : huit onglets pleins et export par tranches sans perte',function()
  local A=loadAddon()
@@ -937,7 +1015,8 @@ test('coffre : huit onglets pleins et export par tranches sans perte',function()
  print('   coffre plein : '..items..' emplacements, '..#job.result..' octets, '..steps..' étapes')
 end)
 test('coffre : UPDATE_TABS de réponse inchangé ne crée pas de boucle',function()
- local A=loadAddon(); fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); update(1)
+ local A=loadAddon(); MOCK.tabs[1].slots[3]={item='item:2318',count=1,name='Étoffe fictive',quality=1}
+ fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); update(1)
  fire('GUILDBANK_UPDATE_TABS'); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
  eq(A.stockScan,nil); update(1); update(1); eq(#MOCK.queries,1)
  MOCK.tabs[1].name='Renommé'; fire('GUILDBANK_UPDATE_TABS'); update(1); update(1)
@@ -956,10 +1035,10 @@ test('régression revue : événement onglet 1 ne valide ni cache froid ni cache
   MOCK.tabs[2]={name='Réserve 2',icon=133784,viewable=true,slots=stale and {[98]=slot} or {}}
   GetNumGuildBankTabs=function() return #MOCK.tabs end
   fire('GUILDBANKFRAME_OPENED'); update(1); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); update(1)
-  eq(A.stockScan.pending,2); eq(MOCK.currentTab,1)
+  eq(#MOCK.queries,1); eq(MOCK.currentTab,1) -- only the displayed tab is queried
   MOCK.tabs[1].slots={}; fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
   eq(A.db.stock[2],old); eq(A.db.stock[2].scannedAt,oldAt)
-  assert(A.stockScan and A.stockScan.pending==2,'la requête 2 reste non confirmée')
+  eq(#MOCK.queries,2); eq(MOCK.queries[2].tab,1)
   fire('GUILDBANKFRAME_CLOSED'); eq(A.db.stock[2],old)
   eq(LiLiBanque.Export.json({stock={[2]=A.db.stock[2]}}),exportedBefore)
   eq(PY_CHECK(LiLiBanque.Export.build(A.db),A.db),'ok')
@@ -999,33 +1078,36 @@ test('coffre confirmé : données reçues dans une requête synchrone ne sont pa
  QueryGuildBankTab=function(tab) query(tab); fire('GUILDBANKBAGSLOTS_CHANGED') end
  fire('GUILDBANKFRAME_OPENED'); update(1); update(1)
  eq(A.db.stock[1],nil)
+ fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); update(1); update(1)
+ eq(A.db.stock[1],nil) -- the synchronous event in the second query is not a reply either
  fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); assert(A.db.stock[1])
 end)
 test('coffre confirmé : cache terminé ne reçoit pas un nouvel horodatage via un autre onglet',function()
  local A=loadAddon(); MOCK.tabs[2]={name='Deux',icon=133784,viewable=true,slots={}}
  GetNumGuildBankTabs=function() return #MOCK.tabs end
  fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); update(1)
- fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); local first=A.db.stock[1]; local at=first.scannedAt
- MOCK.currentTab=2; update(1); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
+ fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); confirmEmpty(); local first=A.db.stock[1]; local at=first.scannedAt
+ MOCK.currentTab=2; update(1); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); confirmEmpty()
  eq(A.db.stock[1],first); eq(A.db.stock[1].scannedAt,at); assert(A.db.stock[2])
 end)
 test('coffre confirmé : sélectionner un onglet tardivement impose une nouvelle requête',function()
- local A=loadAddon(); fire('PLAYER_LOGIN')
+ local A=loadAddon()
+ MOCK.tabs[1].slots[3]={item='item:2318',count=1,name='Étoffe fictive',quality=1}; fire('PLAYER_LOGIN')
  MOCK.tabs[2]={name='Deux',icon=133784,viewable=true,
   slots={[98]={item='item:2318',count=20,name='Light Leather',quality=1}}}
  GetNumGuildBankTabs=function() return #MOCK.tabs end
  fire('GUILDBANKFRAME_OPENED'); update(1); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); update(1)
- eq(MOCK.queries[2].tab,2); eq(MOCK.currentTab,1)
+ eq(#MOCK.queries,1); eq(MOCK.currentTab,1)
  MOCK.currentTab=2; fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
  eq(A.db.stock[2],nil) -- event occurred before a query issued with tab 2 selected
- update(0.5); eq(MOCK.queries[3].tab,2); update(1); eq(A.db.stock[2],nil)
+ eq(#MOCK.queries,2); eq(MOCK.queries[2].tab,2); update(1); eq(A.db.stock[2],nil)
  fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); eq(A.db.stock[2].slots[98].count,20)
 end)
 test('coffre confirmé : onglet sélectionné prioritaire au nouveau passage',function()
  local A=loadAddon(); MOCK.tabs[2]={name='Deux',icon=133784,viewable=true,slots={}}
  GetNumGuildBankTabs=function() return #MOCK.tabs end
  MOCK.currentTab=2; fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED'); update(1)
- eq(MOCK.queries[1].tab,2); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5)
+ eq(MOCK.queries[1].tab,2); fire('GUILDBANKBAGSLOTS_CHANGED'); update(0.5); confirmEmpty()
  assert(A.db.stock[2]); eq(A.db.stock[1],nil)
 end)
 test('coffre confirmé : confirmation vide ne se transmet pas à l’onglet suivant après refus',function()

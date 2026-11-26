@@ -2,7 +2,7 @@
 ## Title: LiLiBanque
 ## Notes: Relevés et synchronisation des cotisations — La Bande à Li Li
 ## Author: La Bande à Li Li
-## Version: 1.3.0
+## Version: 1.4.0
 ## SavedVariables: LiLiBanqueDB
 ## SavedVariablesPerCharacter: LiLiBanqueState
 

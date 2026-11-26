@@ -76,6 +76,19 @@ function A:guard(where,fn,...)
     if not ok then self:capture(where,err) end
 end
 
+local function stockTabInfo(self,tab)
+    if not self.db or safe(GetGuildInfo,'player')~=self.guild then return end
+    local n=safe(GetNumGuildBankTabs)
+    if type(n)~='number' or n<1 or n>8 or n~=floor(n)
+        or type(tab)~='number' or tab<1 or tab>n or tab~=floor(tab) then return end
+    return safe(GetGuildBankTabInfo,tab)
+end
+function A:stockAccess(tab,snapshot)
+    local name,_,viewable=stockTabInfo(self,tab)
+    return viewable==true and type(name)=='string' and name~=''
+        and (not snapshot or snapshot.name==name)
+end
+
 function A:init()
     self.nextInit=clock()+5
     if not self:inGuild() then
@@ -96,10 +109,15 @@ function A:init()
     if not self.sync then
         local registration=safe(C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix,S.PREFIX)
         self.prefixOK=registration==true or registration==0 or registration==1
+        -- This guild authorizes all accessible tabs on the officer channel, not GUILD.
+        local function stockAccess(tab,snapshot) return self:stockAccess(tab,snapshot) end
         self.sync=S.new(db,state,name,self.guild,function(msg)
             if not self.prefixOK or not self:active() or not C_ChatInfo or not C_ChatInfo.SendAddonMessage then return 9 end
             return C_ChatInfo.SendAddonMessage(S.PREFIX,msg,'OFFICER')
-        end,clock,now)
+        end,clock,now,{canShare=stockAccess,canRead=stockAccess,onReceived=function()
+            self.stockPeerUpdates=(self.stockPeerUpdates or 0)+1
+            self:updateUI()
+        end})
     end
     self.status='Prêt'; self:request(); self.sync:hello(); self:remind()
     if self.bankOpen then self:startStock() end
@@ -247,17 +265,20 @@ function A:scanRoster()
     self.db.roster={scannedAt=now(),members=members}; self.db.scannedBy[self.name]=now()
 end
 
--- Stock is local only: never passed to Sync. Slot count is local in Blizzard's
--- Mainline GuildBankUI (98), not an exported MAX_GUILDBANK_SLOTS_PER_TAB global.
+-- Forever 1.60.1.71139: GuildBankUI queries the selected tab, and
+-- GUILDBANKBAGSLOTS_CHANGED has no tab index. Never query a background tab here.
+-- The 98 slots are a local GuildBankUI constant, not an exported global.
 local STOCK_SLOTS=98
 local STOCK_SPACING=1
 local STOCK_DEBOUNCE=0.5
 function A:stockSummary()
     local tabs,items,latest=0,0,nil
-    for _,tab in pairs(self.db and self.db.stock or {}) do
-        tabs=tabs+1
-        for _,slot in pairs(tab.slots or {}) do items=items+slot.count end
-        if not latest or tab.scannedAt>latest then latest=tab.scannedAt end
+    for index,tab in pairs(self.db and self.db.stock or {}) do
+        if self:stockAccess(index,tab) then
+            tabs=tabs+1
+            for _,slot in pairs(tab.slots or {}) do items=items+slot.count end
+            if not latest or tab.scannedAt>latest then latest=tab.scannedAt end
+        end
     end
     return tabs,items,latest
 end
@@ -268,53 +289,53 @@ function A:stockText()
     return 'Coffre : '..tabs..(tabs==1 and ' onglet' or ' onglets')..', '..items..(items==1 and ' objet' or ' objets')
 end
 function A:finishStock(reason)
-    local scan=self.stockScan
     self.stockScan=nil; self.stockDue=nil
-    local tabs,items=scan and scan.done or 0,scan and scan.items or 0
-    local text
-    if tabs>0 then
-        text='Coffre : '..tabs..(tabs==1 and ' onglet' or ' onglets')..', '..items..(items==1 and ' objet' or ' objets')
-        if reason or scan.reason then text=text..' — '..(reason or scan.reason) end
-    else text='Coffre : '..(reason or scan and scan.reason or 'aucun onglet relevé') end
-    self.stockStatus=text; printFR(text); self:updateUI()
+    self.stockStatus=reason and ('Coffre : '..reason) or nil
+    local result=reason and 'failure' or 'success'
+    if self.stockManual or not self.stockReported[result] then printFR(self:stockText()) end
+    self.stockManual=nil; self.stockReported[result]=true
+    self:updateUI()
 end
 function A:startStock()
     if not self:active() or not self.bankOpen then return end
     if self.stockScan then return end
-    self.stockScan={started=clock(),queue={},done=0,items=0,discover=true}
+    self.stockScan={started=clock()}
     self.stockDue=clock()+STOCK_DEBOUNCE
     self.stockStatus='Coffre : relevé en cours…'
 end
+function A:observeStockTab(t)
+    local selected=safe(GetCurrentGuildBankTab)
+    if selected~=self.stockTab then
+        self.stockTab=selected
+        -- A selection change voids the prior query, event and empty confirmation.
+        -- Schedule the newly displayed tab even if no slot event arrived yet.
+        if self.stockScan and self.stockScan.pending then self.stockScan=nil end
+        if not self.stockScan then self:startStock(); self.stockDue=t end
+    end
+    return selected
+end
 function A:stockChanged()
     if not self:active() or not self.bankOpen then return end
+    local t=clock(); self:observeStockTab(t)
+    self:startStock()
     local scan=self.stockScan
-    if not scan then self.stockDue=clock()+STOCK_DEBOUNCE; return end
-    if not scan.pending then self.stockRefresh=true; return end
-    local selected=safe(GetCurrentGuildBankTab)
-    if selected~=scan.pending then
-        scan.selectedRequest=false; scan.ready=nil; scan.confirmAt=nil; scan.secondEmpty=nil
-        scan.pendingReason='onglet '..scan.pending..' non confirmé ; relevé précédent conservé'
-        self.stockStatus='Coffre : '..scan.pendingReason..' (sélectionnez cet onglet)'
-        self.stockRefresh=true
-    elseif scan.issued and scan.selectedRequest and not scan.confirmAt then
-        -- The signal is global, not an acknowledgement for any outstanding tab.
-        -- Only a query issued while THIS tab was selected can admit a later event.
-        scan.ready=true; scan.readAt=clock()+STOCK_DEBOUNCE
+    if not scan.pending then self.stockDue=t+STOCK_DEBOUNCE
+    elseif scan.issued and not scan.confirmAt then
+        -- A movement or a native tab selection may generate this signal. It
+        -- can only trigger a read after our own query of that same selection.
+        scan.readAt=t+STOCK_DEBOUNCE
     end
 end
 function A:queryStock(scan,tab)
-    scan.pending=tab; scan.askedAt=clock(); scan.ready=nil; scan.issued=false
-    scan.selectedRequest=safe(GetCurrentGuildBankTab)==tab
-    scan.pendingReason=not scan.selectedRequest and ('onglet '..tab..' non confirmé ; relevé précédent conservé') or nil
+    local _,_,viewable=stockTabInfo(self,tab)
+    if viewable~=true then return self:finishStock('onglet non visible pour ce rang ; relevé précédent conservé') end
+    scan.pending=tab; scan.askedAt=clock(); scan.readAt=nil; scan.issued=false
+    self.stockNextQuery=scan.askedAt+STOCK_SPACING
     local ok,err=pcall(QueryGuildBankTab,tab)
     scan.issued=ok -- synchronous signals inside Query are not post-query responses
     if not ok then
-        self.lastApiError=shortError(err); scan.reason='onglet '..tab..' refusé par le jeu : '..shortError(err)
-        scan.pending=nil; scan.confirmAt=nil; scan.secondEmpty=nil
-        self.stockDue=clock()+STOCK_SPACING
-    elseif not scan.selectedRequest then
-        self.stockStatus='Coffre : '..scan.pendingReason..' (sélectionnez cet onglet)'
-        self:updateUI()
+        self.lastApiError=shortError(err)
+        self:finishStock('relevé refusé par le jeu ; relevé précédent conservé')
     end
 end
 function A:stockTabsChanged()
@@ -328,20 +349,20 @@ function A:stockTabsChanged()
     end
 end
 function A:readStock(tab)
-    local name,icon,viewable=safe(GetGuildBankTabInfo,tab)
-    if not viewable then return nil,'onglet '..tab..' non visible pour ce rang' end
+    local name,icon,viewable=stockTabInfo(self,tab)
+    if viewable~=true then return nil,'onglet non visible pour ce rang' end
     if type(icon)=='string' then icon=safe(GetFileIDFromPath,icon) end
     if type(name)~='string' or name=='' or type(icon)~='number' or icon<=0 or icon~=floor(icon) then
-        return nil,'onglet '..tab..' : nom ou icône pas encore chargé'
+        return nil,'nom ou icône de l’onglet pas encore chargé'
     end
     local slots={}; local items=0
     for i=1,STOCK_SLOTS do
         -- Distinguish a genuinely empty slot from an API failure; do not erase
         -- the last complete snapshot on a denied/secret/broken response.
         local ok,texture,n,_,_,quality=pcall(GetGuildBankItemInfo,tab,i)
-        if not ok then self.lastApiError=shortError(texture); return nil,'onglet '..tab..' : emplacements illisibles' end
+        if not ok then self.lastApiError=shortError(texture); return nil,'emplacements illisibles' end
         if issecretvalue and (issecretvalue(texture) or issecretvalue(n) or issecretvalue(quality)) then
-            return nil,'onglet '..tab..' : emplacements masqués par le jeu'
+            return nil,'emplacements masqués par le jeu'
         end
         local link=safe(GetGuildBankItemLink,tab,i)
         if texture or n and n>0 or link then
@@ -350,7 +371,7 @@ function A:readStock(tab)
             if not item or not item:match('^item:%d+[:%d%-]*$') or not itemName or itemName==''
                 or type(n)~='number' or n<1 or n>1000 or n~=floor(n)
                 or type(quality)~='number' or quality~=floor(quality) or quality<0 or quality>8 then
-                return nil,'onglet '..tab..' : objet pas encore chargé (emplacement '..i..')'
+                return nil,'objet pas encore chargé (emplacement '..i..')'
             end
             slots[i]={item=item,count=n,name=itemName,quality=quality}; items=items+n
         end
@@ -358,84 +379,61 @@ function A:readStock(tab)
     return {name=name,icon=icon,scannedAt=now(),scannedBy=self.name,slots=slots},items
 end
 function A:tickStock(t)
+    local selected=self:observeStockTab(t)
     if self.stockRefresh and not self.stockScan then
         self.stockRefresh=nil; self:startStock()
     end
-    if not self.stockScan then
-        if not self.stockDue or t<self.stockDue then return end
-        self:startStock()
-    end
     local scan=self.stockScan
-    if t<(self.stockDue or 0) then return end
-    if scan.discover then
+    if not scan or t<self.stockDue then return end
+    if not scan.pending then
+        if t<(self.stockNextQuery or 0) then return end
         local n=safe(GetNumGuildBankTabs)
-        local queue,meta={},{}; local unknown=type(n)~='number' or n<0 or n>8 or n~=floor(n)
-        if not unknown then
+        if type(n)=='number' and n>=0 and n<=8 and n==floor(n) then
+            local meta,visible,unknown={},0,false
             self.stockBought=n
             for tab=1,n do
                 local name,icon,viewable=safe(GetGuildBankTabInfo,tab)
                 meta[tab]={name=name,icon=icon,viewable=viewable}
-                if viewable then queue[#queue+1]=tab elseif viewable==nil then unknown=true end
+                if viewable==true then visible=visible+1 elseif viewable~=false then unknown=true end
             end
+            self.stockMeta=meta; self.stockVisible=not unknown and visible or nil; self.stockRefresh=nil
+            if n==0 then return self:finishStock('aucun onglet acheté') end
+            if not unknown and visible==0 then return self:finishStock('aucun onglet visible pour ce rang') end
+            local tab=meta[selected]
+            if tab and tab.viewable==true then return self:queryStock(scan,selected) end
+            if tab and tab.viewable==false then return self:finishStock('onglet non visible pour ce rang') end
         end
-        if unknown then
-            if t-scan.started>=10 then return self:finishStock('droits ou onglets pas encore reçus après 10 s') end
-            self.stockDue=t+1; return
-        end
-        self.stockVisible=#queue; self.stockMeta=meta
-        if n==0 then return self:finishStock('aucun onglet acheté') end
-        if #queue==0 then return self:finishStock('aucun onglet visible pour ce rang') end
-        local selected=safe(GetCurrentGuildBankTab)
-        for i,tab in ipairs(queue) do
-            if tab==selected then table.remove(queue,i); table.insert(queue,1,tab); break end
-        end
-        scan.queue=queue; scan.discover=nil
+        if t-scan.started>=10 then return self:finishStock('droits ou onglets pas encore reçus après 10 s') end
+        self.stockDue=t+STOCK_SPACING; return
     end
-    if scan.pending then
-        local selected=safe(GetCurrentGuildBankTab)
-        if selected~=scan.pending then
-            scan.selectedRequest=false; scan.ready=nil; scan.confirmAt=nil; scan.secondEmpty=nil
-            scan.pendingReason='onglet '..scan.pending..' non confirmé ; relevé précédent conservé'
-        elseif not scan.selectedRequest and t-scan.askedAt>=STOCK_SPACING then
-            self:queryStock(scan,scan.pending) -- fresh request after the player visits this tab
-            return
-        elseif scan.confirmAt and t>=scan.confirmAt then
-            scan.confirmAt=nil; scan.secondEmpty=true
-            self:queryStock(scan,scan.pending)
-            return
-        end
-        if scan.ready and scan.selectedRequest and t>=scan.readAt then
-            local snapshot,items=self:readStock(scan.pending)
-            local old=self.db.stock[scan.pending]
-            if snapshot and items==0 and old and next(old.slots) and not scan.secondEmpty then
-                -- All nil getters can also mean a cold cache. A previously full
-                -- tab needs a second selected query and a second post-query event.
-                scan.ready=nil; scan.confirmAt=t+STOCK_SPACING
-                scan.pendingReason='onglet '..scan.pending..' vide non confirmé ; relevé précédent conservé'
-                self.stockStatus='Coffre : '..scan.pendingReason
-                self:updateUI()
-            elseif snapshot then
-                self.db.stock[scan.pending]=snapshot
-                scan.done=scan.done+1; scan.items=scan.items+items
-                scan.pending=nil; scan.ready=nil; scan.readAt=nil; scan.pendingReason=nil; scan.secondEmpty=nil
-                self.stockDue=t+STOCK_SPACING
-            else scan.pendingReason=items; scan.readAt=t+1 end
-        end
-        if scan.pending and t-scan.askedAt>=10 then
-            scan.reason=scan.pendingReason or ('onglet '..scan.pending..' : données non reçues après 10 s ; relevé précédent conservé')
-            scan.pending=nil; scan.ready=nil; scan.pendingReason=nil; scan.confirmAt=nil; scan.secondEmpty=nil
-            self.stockDue=t+STOCK_SPACING
-        end
-        if scan.pending then return end
+    local tab=scan.pending
+    if selected~=tab then return end
+    if scan.confirmAt and t>=scan.confirmAt then
+        scan.confirmAt=nil; scan.secondEmpty=true
+        return self:queryStock(scan,tab)
     end
-    if #scan.queue==0 then return self:finishStock() end
-    if t<self.stockDue then return end
-    local tab=table.remove(scan.queue,1)
-    local _,_,viewable=safe(GetGuildBankTabInfo,tab)
-    if not viewable then
-        scan.reason='onglet '..tab..' non visible pour ce rang'; self.stockDue=t+STOCK_SPACING; return
+    if scan.readAt and t>=scan.readAt then
+        local snapshot,items=self:readStock(tab)
+        local old=self.db.stock[tab]
+        if snapshot and items==0 and not scan.secondEmpty and (not old or old.name~=snapshot.name or next(old.slots)) then
+            -- All nil getters can also mean a cold cache. A first empty read
+            -- could erase a peer's stock too: require a second query and event.
+            scan.readAt=nil; scan.confirmAt=t+STOCK_SPACING
+            scan.pendingReason='onglet vide non confirmé'..(old and ' ; relevé précédent conservé' or ' ; aucun relevé enregistré')
+            self.stockStatus='Coffre : '..scan.pendingReason
+            self:updateUI(); return
+        elseif snapshot then
+            if old and type(old.scannedAt)=='number' and old.scannedAt>snapshot.scannedAt then
+                return self:finishStock('relevé plus récent déjà disponible')
+            end
+            self.db.stock[tab]=snapshot
+            if self.sync and self.sync.stockUpdated then self.sync:stockUpdated(tab) end
+            return self:finishStock()
+        else scan.pendingReason=items; scan.readAt=t+STOCK_SPACING end
     end
-    self:queryStock(scan,tab)
+    if t-scan.askedAt>=10 then
+        self:finishStock(scan.pendingReason or 'données non reçues après 10 s ; relevé précédent conservé')
+    end
 end
 
 -- Bank opening: several signals (legacy event, interaction manager, frame OnShow),
@@ -452,6 +450,7 @@ function A:bankOpened(via)
     if LiLiBanque.UI then LiLiBanque.UI.attach() end
     if self.bankOpen then return end
     self.bankOpen=true; self.openedVia=via; self.reported=false; self.pending=false; self.nextBank=0
+    self.stockReported={}; self.stockManual=nil
     if not self.db then self:init() end
     if not self:active() then self.reported=true; printFR(self:inactiveReason()); self:updateUI(); return end
     self:recordMoney(); self:request(); self:startStock(); self:updateUI()
@@ -463,13 +462,14 @@ function A:bankClosed()
         local detail=self.stockScan.pendingReason
         self:finishStock('banque fermée avant la fin du relevé'..(detail and ' — '..detail or ' ; relevé précédent conservé'))
     end
-    self.stockDue=nil; self.stockRefresh=nil
+    self.stockDue=nil; self.stockRefresh=nil; self.stockTab=nil; self.stockNextQuery=nil
     self.bankOpen=false; self:updateUI()
 end
 function A:scanNow()
     if not self.db then self:init() end
     if not self:active() then printFR(self:inactiveReason()); return end
     if not self.bankOpen then self:request(); printFR('ouvrez la banque de guilde pour relever le journal d’or.'); return end
+    self.stockManual=true
     self.reported=false; self.pending=false; self.nextBank=0; self:request(); self:startStock()
 end
 function A:tick()
@@ -515,6 +515,7 @@ function A:diagLines()
     out[#out+1]='Coffre : '..tostring(self.stockBought or safe(GetNumGuildBankTabs) or '?')..' achetés, '
         ..tostring(self.stockVisible or '?')..' visibles, '..savedTabs..' relevés ; '..self:stockText()
     out[#out+1]='Dernier relevé du coffre : '..(stockAt and (safe(date,'%d/%m %H:%M',stockAt) or '?') or 'jamais')
+        ..' ; relevés reçus entre officiers : '..(self.stockPeerUpdates or 0)
     local last=self.last
     out[#out+1]='Journal d’or : '..(last and ((last.ok and 'relevé, ' or 'échec, ')..last.lines..' lignes lues, '..last.newLines..' nouvelles'..(last.reason and ' — '..last.reason or '')) or 'pas encore relevé')
         ..(self.skipped and self.skipped>0 and ' ; '..self.skipped..' lignes hors contrat ignorées' or '')
@@ -522,6 +523,11 @@ function A:diagLines()
     local sync=self.sync
     out[#out+1]='Synchro : préfixe '..yesno(self.prefixOK)..' ; file '..(sync and sync.q:size() or 0)..(sync and sync.q.blocked and ' (en pause)' or '')
         ..' ; reçus '..(sync and sync.transferred or 0)
+    if sync and sync.q.lastError then
+        local code=tonumber(sync.q.lastError)
+        out[#out+1]='Transport : '..(sync.q.fault and 'envoi refusé' or 'dernier envoi en échec')
+            ..(code and ' (code '..code..')' or '')..(sync.q.overflow and ' ; file saturée' or '')
+    elseif sync and sync.q.overflow then out[#out+1]='Transport : file saturée' end
     if self.db then
         local _,ids=LiLiBanque.Wire.digest(self.db.ledger)
         local members=0; for _ in pairs(self.db.roster and self.db.roster.members or {}) do members=members+1 end
@@ -558,7 +564,8 @@ function A:command(text)
             local st=uiState()
             LiLiBanqueDB=nil; LiLiBanqueState={ui=st.ui,reminderEnabled=st.reminderEnabled,lastReminderAt=st.lastReminderAt}
             self.db=nil; self.state=nil; self.sync=nil; self.confirmUntil=nil; self.last=nil
-            self.stockScan=nil; self.stockDue=nil; self.stockRefresh=nil; self.stockStatus=nil
+            self.stockScan=nil; self.stockDue=nil; self.stockRefresh=nil; self.stockStatus=nil; self.stockManual=nil
+            self.stockTab=nil; self.stockNextQuery=nil
             self.stockBought=nil; self.stockVisible=nil; self.stockMeta=nil
             self:init(); printFR('données locales réinitialisées. Les autres officiers pourront les resynchroniser.')
         else printFR('confirmation expirée : /lili reset') end

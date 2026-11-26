@@ -5,17 +5,18 @@ PY_CHECK decodes an in-game export independently of the Lua encoder: base64, CRC
 JSON parse, then compares with the expected subset built from the Lua table itself.
 """
 from pathlib import Path
+from typing import Any
 import base64
 import binascii
 import hashlib
 import json
+import os
 import re
 import sys
 import zlib
 try:
     from lupa.lua51 import LuaRuntime
 except ImportError:
-    import os
     if not os.environ.get('LUPA_PATH'):
         raise
     sys.path.insert(0, os.environ['LUPA_PATH'])
@@ -25,7 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 assert hashlib.sha256((ROOT / 'tests/compat/sync-1.1.1.lua').read_bytes()).hexdigest() == '270cdcc94503a4dc8646b5c8e8b5aecf29b7e38a15892154f44bb396dcecf1af'
 assert hashlib.sha256((ROOT / 'tests/compat/core-1.2.0.lua').read_bytes()).hexdigest() == '7ee3eb33de6c8afff068ae263a2da0183fa85d1ae4ef3e9cf9a03668e75e5681'
 # encoding=None: Lua strings stay bytes, so invalid UTF-8 in test data reaches Python intact.
-lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+runtime: Any = LuaRuntime  # stubs do not describe byte mode
+lua = runtime(unpack_returned_tuples=True, encoding=None)
 lua_type = lua.eval(b'type')
 ARRAYS = {'bankMoney', 'gaps'}
 
@@ -85,4 +87,8 @@ g = lua.globals()
 g[b'ROOT'] = str(ROOT).encode()
 g[b'PY_CHECK'] = py_check
 g[b'PY_CRC32'] = lambda s: ('%08x' % zlib.crc32(s)).encode()
-lua.execute((ROOT / 'tests/test.lua').read_bytes())
+# The older shared suite defines a global test(), so run the standalone transport tests first.
+if legacy_root := os.environ.get('STOCK_LEGACY_ROOT'):
+    g[b'STOCK_LEGACY_ROOT'] = str(Path(legacy_root).resolve()).encode()
+for suite in ('p2p-catchup.lua', 'stock-p2p.lua', 'test.lua', 'ui-redesign.lua', 'coffre.lua'):
+    lua.execute((ROOT / 'tests' / suite).read_bytes())

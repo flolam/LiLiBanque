@@ -34,7 +34,10 @@ function FontString:GetText() return self.text end
 function FontString:SetJustifyH(j) self.justify = j end
 function FontString:SetWordWrap(v) self.wrap = v end
 function FontString:SetTextColor() end
-function Texture:SetColorTexture(r, g, b, a) self.color = {r, g, b, a} end
+function Texture:SetColorTexture(r, g, b, a) self.color = {r, g, b, a}; self.texture = nil end
+function Texture:SetTexture(t) self.texture = t; self.color = nil end
+function Texture:GetTexture() return self.texture end
+function Texture:SetTexCoord(...) self.texCoord = {...} end
 
 function Frame:SetScript(name, fn) self.scripts[name] = fn end
 function Frame:GetScript(name) return self.scripts[name] end
@@ -48,14 +51,15 @@ function Frame:RegisterEvent(event)
     self.events[event] = true
 end
 -- Font objects verified in Blizzard_Fonts_Shared/Shared/FontStyles.xml (Forever 1.60.1).
+-- NumberFontNormal: same file, used by ItemButton's Count (Blizzard_ItemButton/Shared/ItemButtonTemplate.xml).
 M.fonts = {GameFontNormal = true, GameFontNormalLarge = true, GameFontNormalSmall = true, GameFontHighlight = true,
-    GameFontHighlightSmall = true, GameFontDisableSmall = true, GameFontDisableLarge = true}
+    GameFontHighlightSmall = true, GameFontDisableSmall = true, GameFontDisableLarge = true, NumberFontNormal = true}
 function Frame:CreateFontString(name, layer, font)
     if font and not M.fonts[font] then error('police absente : '..font) end
-    local fs = setmetatable({parent = self, font = font, layer = layer}, FontString); M.all[#M.all + 1] = fs; return fs
+    local fs = setmetatable({parent = self, font = font, layer = layer, shown = true}, FontString); M.all[#M.all + 1] = fs; return fs
 end
 function Frame:CreateTexture(name, layer)
-    local t = setmetatable({parent = self, layer = layer}, Texture); return t
+    local t = setmetatable({parent = self, layer = layer, shown = true}, Texture); M.textures[#M.textures + 1] = t; return t
 end
 function Frame:SetMovable(v) self.movable = v end
 function Frame:EnableMouse(v) self.mouse = v end
@@ -115,8 +119,22 @@ end
 M.templates = {UIPanelCloseButtonDefaultAnchors = true, UIPanelButtonTemplate = true, BasicFrameTemplate = true, ButtonFrameTemplate = true, InputScrollFrameTemplate = true, PanelTabButtonTemplate = true}
 
 function M.install()
-    M.all = {}
+    M.all = {}; M.textures = {}
     UIParent = new('Frame', 'UIParent'); UISpecialFrames = {}
+    -- GameTooltip (Blizzard_GameTooltip): only the widget methods the addon may call.
+    M.tooltip = {shown = false}
+    GameTooltip = {
+        SetOwner = function(self, owner, anchor) M.tooltip = {owner = owner, anchor = anchor, shown = false} end,
+        GetOwner = function(self) return M.tooltip.owner end,
+        SetHyperlink = function(self, link) M.tooltip.link = link end,
+        SetText = function(self, t) M.tooltip.text = t end,
+        Show = function(self) M.tooltip.shown = true end,
+        Hide = function(self) M.tooltip.shown = false; M.tooltip.owner = nil end,
+        IsShown = function(self) return M.tooltip.shown end,
+    }
+    -- C_Item.GetItemIconByID (ItemDocumentation.lua): fileID or nil when unknown.
+    M.icons = {}; M.iconCalls = 0
+    C_Item = {GetItemIconByID = function(info) M.iconCalls = M.iconCalls + 1; return M.icons[info] end}
     CreateFrame = function(kind, name, parent, template) return new(kind, name, parent, template) end
     ButtonFrameTemplate_HidePortrait = function(f) f:SetPortraitShown(false) end
     PanelTemplates_SetNumTabs = function(f, n) f.numTabs = n end
