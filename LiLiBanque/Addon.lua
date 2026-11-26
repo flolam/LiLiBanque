@@ -145,6 +145,18 @@ function A:remind()
     printFR(text..' : passe à la banque de guilde si tu peux, le journal d’or ne garde que les dernières lignes.')
     self.state.lastReminderAt=at
 end
+function A:noticeUpdate(t,restricted)
+    if self.state.updateNoticeEnabled==false then return end
+    local due=self.nextUpdateNotice
+    if due and t<due then return end
+    local version=self.sync:newerVersion(t,self.state.lastUpdateNotice)
+    if not version then self.nextUpdateNotice=nil; return end
+    if not due then self.nextUpdateNotice=t+5; return end -- Collect announcements before picking the highest.
+    if restricted or not DEFAULT_CHAT_FRAME then return end
+    printFR('Version plus récente détectée ('..version..'). Vérifie la mise à jour dans WowUp.')
+    self.state.lastUpdateNotice=version
+    self.nextUpdateNotice=t+120
+end
 -- Reason shown in chat and on the bank line when the addon cannot scan.
 function A:inactiveReason()
     if not self:inGuild() then
@@ -586,7 +598,8 @@ end
 function A:tick()
     local t=clock()
     if not self.db and t>=self.nextInit then self:init() end
-    if not self.nextUI or t>=self.nextUI then self.nextUI=t+(LiLiBanque.UI and LiLiBanque.UI.isShown() and 1 or 5); self:updateUI() end
+    local refresh=not self.nextUI or t>=self.nextUI
+    if refresh then self.nextUI=t+(LiLiBanque.UI and LiLiBanque.UI.isShown() and 1 or 5); self:updateUI() end
     self:tickItemJournal(t)
     if not self:active() then return end
     -- Forever addons report the broad restriction flag even outside instances.
@@ -596,6 +609,7 @@ function A:tick()
         or inRestrictedContext and safe(C_ChatInfo and C_ChatInfo.AreOutgoingAddonChatMessagesRestricted)==true
     self.sync:tick(t,locked)
     self:remind()
+    if refresh then self:noticeUpdate(t,inRestrictedContext) end
     if self.bankOpen then
         self:tickStock(t)
         if self.pending then
@@ -670,6 +684,11 @@ function A:command(text)
         uiState().reminderEnabled=cmd=='rappel on'
         printFR('rappel de passage '..(uiState().reminderEnabled and 'activé' or 'désactivé')..' pour ce personnage.')
     elseif cmd=='rappel' or cmd:match('^rappel%s') then printFR('/lili rappel on|off : rappel de passage pour ce personnage')
+    elseif cmd=='maj on' or cmd=='maj off' then
+        local enabled=cmd=='maj on'
+        uiState().updateNoticeEnabled=enabled
+        printFR('rappel de mise à jour '..(enabled and 'activé' or 'désactivé')..' pour ce personnage.')
+    elseif cmd=='maj' or cmd:match('^maj%s') then printFR('/lili maj on|off : rappel de mise à jour pour ce personnage')
     elseif cmd=='diag' then self:diag()
     elseif cmd=='scan' or cmd=='relever' then self:scanNow()
     elseif cmd=='export' or cmd=='exporter' then if LiLiBanque.UI then LiLiBanque.UI.show(); LiLiBanque.UI.startExport() end
@@ -680,7 +699,8 @@ function A:command(text)
     elseif raw=='reset CONFIRMER' then
         if self.confirmUntil and clock()<=self.confirmUntil then
             local st=uiState()
-            LiLiBanqueDB=nil; LiLiBanqueState={ui=st.ui,reminderEnabled=st.reminderEnabled,lastReminderAt=st.lastReminderAt}
+            LiLiBanqueDB=nil; LiLiBanqueState={ui=st.ui,reminderEnabled=st.reminderEnabled,lastReminderAt=st.lastReminderAt,
+                updateNoticeEnabled=st.updateNoticeEnabled,lastUpdateNotice=st.lastUpdateNotice}
             self.db=nil; self.state=nil; self.sync=nil; self.confirmUntil=nil; self.last=nil
             self.stockScan=nil; self.stockDue=nil; self.stockRefresh=nil; self.stockStatus=nil; self.stockManual=nil
             self.stockTab=nil; self.stockNextQuery=nil
@@ -689,7 +709,7 @@ function A:command(text)
             self:init(); printFR('données locales réinitialisées. Les autres officiers pourront les resynchroniser.')
         else printFR('confirmation expirée : /lili reset') end
     else
-        printFR('/lili : fenêtre ; /lili diag : diagnostic ; /lili scan : relever (banque ouverte) ; /lili export : export pour le site ; /lili rappel on|off : rappel de passage ; /lili reset : effacer les données locales')
+        printFR('/lili : fenêtre ; /lili diag : diagnostic ; /lili scan : relever (banque ouverte) ; /lili export : export pour le site ; /lili rappel on|off : rappel de passage ; /lili maj on|off : rappel de mise à jour ; /lili reset : effacer les données locales')
     end
     self:updateUI()
 end

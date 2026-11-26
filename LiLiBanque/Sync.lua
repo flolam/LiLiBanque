@@ -49,11 +49,18 @@ local function stockHeader(s,wall)
     return type(s)=='table' and C.validScanAt(s.scannedAt,wall) and plainText(s.name,120)
         and plainText(s.scannedBy,120) and integer(s.icon,1,2147483647) and type(s.slots)=='table'
 end
-local function validVersion(s)
-    if type(s)~='string' or #s>16 then return false end
+local function versionParts(s)
+    if type(s)~='string' or #s>16 then return end
     local a,b,c=s:match('^([0-9]+)%.([0-9]+)%.([0-9]+)$')
     local function canonical(n) return #n==1 or n:sub(1,1)~='0' end
-    return a~=nil and canonical(a) and canonical(b) and canonical(c)
+    if a and canonical(a) and canonical(b) and canonical(c) then return tonumber(a),tonumber(b),tonumber(c) end
+end
+local function versionGreater(a,b)
+    local am,an,ap=versionParts(a); local bm,bn,bp=versionParts(b)
+    return am~=nil and bm~=nil and (am>bm or am==bm and (an>bn or an==bn and ap>bp))
+end
+local function freshVersion(seen,now)
+    return seen.versionAt and now-seen.versionAt<=OFFICER_WINDOW and seen.version or nil
 end
 local function allow(policy,key,tab,snapshot)
     local fn=policy[key]; if type(fn)~='function' then return false end
@@ -243,7 +250,7 @@ end
 function S.new(db,state,name,guild,send,clock,wallTime,stockPolicy)
     wallTime=wallTime or clock
     local self={db=db,state=state,name=name,guild=guild,q=W.queue(send),rx=W.receiver(),clock=clock,serial=0,peers={},seen={},seenCount=0,transferred=0,nextHello=0,turn=0}
-    local version=validVersion(C.VERSION) and C.VERSION
+    local version=versionParts(C.VERSION) and C.VERSION
     local nextVersion=clock()
     local function remember(peerName,sender,now,declared)
         if not plainText(peerName,150) then return end
@@ -266,11 +273,21 @@ function S.new(db,state,name,guild,send,clock,wallTime,stockPolicy)
         local list={}
         for peerName,seen in pairs(self.seen) do
             if now-seen.at<=OFFICER_WINDOW then
-                list[#list+1]={name=peerName,version=seen.versionAt and now-seen.versionAt<=OFFICER_WINDOW and seen.version or nil}
+                list[#list+1]={name=peerName,version=freshVersion(seen,now)}
             end
         end
         table.sort(list,function(a,b) return a.name<b.name end)
         return list
+    end
+    function self:newerVersion(now,lastShown)
+        if not version then return end
+        local threshold=versionGreater(lastShown,version) and lastShown or version
+        local latest=threshold
+        for _,seen in pairs(self.seen) do
+            local declared=freshVersion(seen,now)
+            if declared and versionGreater(declared,latest) then latest=declared end
+        end
+        if latest~=threshold then return latest end
     end
     local epoch=string.format('%x',math.floor(clock()*1000)%2147483647)
     local function stockId(serial) return 's'..epoch..'-'..serial end
@@ -410,7 +427,7 @@ function S.new(db,state,name,guild,send,clock,wallTime,stockPolicy)
         -- Display-only broadcast. Older clients ignore the separate column;
         -- never let a version packet change the peer's journal jobs or proof.
         if col=='version' then
-            if op=='V' and f[3]=='' and #payload<=512 and #f==6 and validVersion(f[6]) then
+            if op=='V' and f[3]=='' and #payload<=512 and #f==6 and versionParts(f[6]) then
                 remember(peerName,sender,now,f[6])
             end
             return

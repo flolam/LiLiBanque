@@ -466,6 +466,72 @@ test('officiers vus par la synchro affichés par leur nom applicatif',function()
  assert(p.peerRows[1].name.text:find('Magor Barbefer',1,true))
  assert(p.peerRows[1].version.text:find('version inconnue',1,true))
 end)
+local function officerVersion(version,who,channel)
+ who=who or 'Magor Barbefer'
+ local fields=version and {'V',LiLiBanque.Addon.guild,'','version',who,version}
+     or {'B',LiLiBanque.Addon.guild,'','bankScan',who,tostring(NOW)}
+ local W=LiLiBanque.Wire
+ for _,msg in ipairs(W.chunks(W.pack(fields),'1')) do
+  fire('CHAT_MSG_ADDON',LiLiBanque.Sync.PREFIX,msg,channel or 'OFFICER',who)
+ end
+end
+test('version officier : triplet numérique, une ligne de chat locale et aucun envoi',function()
+ local A=loadAddon(); LiLiBanque.Core.VERSION='1.4.9'
+ IsInInstance=function() return false end; InCombatLockdown=function() return false end
+ local sends,public=0,0
+ C_ChatInfo.SendAddonMessage=function() sends=sends+1; return 0 end
+ C_ChatInfo.SendChatMessage=function() public=public+1 end
+ local previousSendChatMessage=SendChatMessage; SendChatMessage=C_ChatInfo.SendChatMessage
+ fire('PLAYER_LOGIN')
+ for _=1,12 do update(1) end -- Drain normal login traffic before observing V.
+ eq(A.sync.q:size(),0); local before=sends
+ CHAT={}
+ officerVersion('1.4.9'); officerVersion('1.4.8'); officerVersion('1.4.20-rc.1')
+ officerVersion('1.4.020'); officerVersion(nil,'Autre Fictive'); officerVersion('9.9.9',nil,'GUILD')
+ update(5); update(5); eq(#CHAT,0)
+ officerVersion('1.4.10'); update(5); update(5)
+ SendChatMessage=previousSendChatMessage
+ eq(CHAT[1],'|cffffd100LiLiBanque|r : Version plus récente détectée (1.4.10). Vérifie la mise à jour dans WowUp.')
+ eq(#CHAT,1); eq(sends,before); eq(public,0); eq(A.sync.q:size(),0)
+ assert(not LiLiBanque.UI.isShown(),'aucune fenêtre ouverte par le rappel')
+end)
+test('version officier : plusieurs annonces groupées, combat, retour et signal expiré',function()
+ loadAddon(); fire('PLAYER_LOGIN'); CHAT={}
+ local instance,combat=true,false
+ IsInInstance=function() return instance end; InCombatLockdown=function() return combat end
+ officerVersion('1.4.9'); update(0); officerVersion('1.4.10','Autre Fictive')
+ update(10); eq(#CHAT,0)
+ instance=false; combat=true; update(5); eq(#CHAT,0)
+ combat=false; update(5); eq(#CHAT,1); assert(chat('détectée (1.4.10)'))
+ officerVersion('1.4.10'); officerVersion('1.4.11','Autre Fictive'); update(5); eq(#CHAT,1)
+ officerVersion('1.5.0','Autre Fictive'); update(110); eq(#CHAT,1)
+ update(5); eq(#CHAT,2); assert(chat('détectée (1.5.0)'))
+ instance=true; officerVersion('1.5.1'); update(120); eq(#CHAT,2)
+ instance=false; update(781); eq(#CHAT,2)
+ officerVersion('1.5.1'); update(5); update(5); eq(#CHAT,3); assert(chat('détectée (1.5.1)'))
+end)
+test('version officier : préférence par personnage, fenêtre, export inchangé et reset/reload',function()
+ local A=loadAddon(); fire('PLAYER_LOGIN')
+ local E=LiLiBanque.Export; local exported=E.build(A.db); local account=E.json(A.db)
+ SlashCmdList.LILIBANQUE(''); local panel=LiLiBanque.UI.sections[1].panel
+ local _,_,_,_,listY=panel.list:GetPoint()
+ SlashCmdList.LILIBANQUE('maj off'); CHAT={}
+ officerVersion('1.4.10'); update(5); update(5); eq(#CHAT,0)
+ assert(panel.values.updateNotice.text:find('Rappel MAJ désactivé',1,true))
+ eq(A.state.reminderEnabled,nil)
+ SlashCmdList.LILIBANQUE('maj on'); CHAT={}; update(5); update(5)
+ assert(chat('détectée (1.4.10)')); assert(panel.values.updateNotice.text:find('Version plus récente',1,true))
+ eq(select(5,panel.list:GetPoint()),listY)
+ eq(E.build(A.db),exported); eq(E.json(A.db),account); eq(A.state.lastUpdateNotice,'1.4.10')
+ A=loadAddon(true); fire('PLAYER_LOGIN'); CHAT={}
+ officerVersion('1.4.10'); officerVersion('1.4.9','Autre Fictive'); update(5); update(5); eq(#CHAT,0)
+ SlashCmdList.LILIBANQUE('rappel off'); SlashCmdList.LILIBANQUE('maj off')
+ SlashCmdList.LILIBANQUE('reset'); SlashCmdList.LILIBANQUE('reset CONFIRMER'); CHAT={}
+ eq(A.state.reminderEnabled,false); eq(A.state.updateNoticeEnabled,false); eq(A.state.lastUpdateNotice,'1.4.10')
+ officerVersion('1.4.11'); update(5); update(5); eq(#CHAT,0)
+ SlashCmdList.LILIBANQUE('maj on'); CHAT={}; update(5); update(5)
+ assert(chat('détectée (1.4.11)')); eq(A.state.reminderEnabled,false)
+end)
 test('solde relevé même lorsque le journal est refusé',function()
  local A=loadAddon(); QueryGuildBankLog=function() error('refusé') end
  fire('PLAYER_LOGIN'); fire('GUILDBANKFRAME_OPENED')

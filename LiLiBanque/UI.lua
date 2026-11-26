@@ -67,6 +67,8 @@ function bank.build(panel)
     local split=rule(panel,false); split:SetPoint('TOPLEFT',SPLIT,-10); split:SetHeight(84)
     -- Right: « Entre officiers » (proof of P2P only, never total bank coverage).
     local rhead=text(panel,'GameFontNormal'); rhead:SetPoint('TOPLEFT',SPLIT+12,-8); rhead:SetText('Entre officiers')
+    values.updateNotice=text(panel,'GameFontHighlightSmall','RIGHT')
+    values.updateNotice:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-10,-8); values.updateNotice:SetWidth(126)
     values.sync=text(panel,'GameFontHighlight'); values.sync:SetPoint('TOPLEFT',SPLIT+12,-28); values.sync:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-10,-28)
     values.sync:SetWordWrap(true); values.sync:SetHeight(30)
     values.peers=text(panel,'GameFontHighlightSmall'); values.peers:SetPoint('TOPLEFT',SPLIT+12,-60); values.peers:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-10,-60)
@@ -175,6 +177,9 @@ function bank.refresh(panel)
     v.money:SetText(GREY..'Solde :|r '..(money and A.money(money.copper)..(stale and GREY..' le '..UI.when(money.at)..'|r' or '') or GREY..'pas encore relevé|r'))
     local sync=A.sync
     v.sync:SetText((bank.syncText(sync,A.clock())))
+    local updateEnabled=not A.state or A.state.updateNoticeEnabled~=false
+    local newer=updateEnabled and sync and A:active() and sync:newerVersion(A.clock())
+    v.updateNotice:SetText(newer and AMBER..'Version plus récente|r' or not updateEnabled and GREY..'Rappel MAJ désactivé|r' or '')
     local seen=sync and sync:officersSeen() or {}
     local more=#seen-#panel.peerRows
     local heading=#seen>0 and ('Officiers vus'..(more>0 and (' (+'..more..')') or '')..' · /lili diag') or 'Aucun officier vu ces 15 min'
