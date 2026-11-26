@@ -462,8 +462,9 @@ test('officiers vus par la synchro affichés par leur nom applicatif',function()
  peer:hello(); for _=1,10 do peer.q:tick(NOW,false); NOW=NOW+1 end
  for _,m in ipairs(out) do fire('CHAT_MSG_ADDON','LiLiBanque1',m,'OFFICER','Magor-Barbefer-CAMWOWEU4Realm7PvP') end
  assert(A.sync.seen['Magor Barbefer']); SlashCmdList.LILIBANQUE('')
- local seen=LiLiBanque.UI.sections[1].panel.values.peers.text
- assert(seen:find('vus : Magor Barbefer',1,true),seen)
+ local p=LiLiBanque.UI.sections[1].panel
+ assert(p.peerRows[1].name.text:find('Magor Barbefer',1,true))
+ assert(p.peerRows[1].version.text:find('version inconnue',1,true))
 end)
 test('solde relevé même lorsque le journal est refusé',function()
  local A=loadAddon(); QueryGuildBankLog=function() error('refusé') end

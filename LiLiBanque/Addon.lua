@@ -640,6 +640,12 @@ function A:diagLines()
         out[#out+1]='Transport : '..(sync.q.fault and 'envoi refusé' or 'dernier envoi en échec')
             ..(code and ' (code '..code..')' or '')..(sync.q.overflow and ' ; file saturée' or '')
     elseif sync and sync.q.overflow then out[#out+1]='Transport : file saturée' end
+    if sync then
+        local seen=sync:officersSeen()
+        out[#out+1]='Officiers vus (15 min) : '..#seen
+        for _,peer in ipairs(seen) do out[#out+1]='  '..peer.name..' : '..(peer.version or 'version inconnue') end
+        if sync.lastSync then out[#out+1]='Dernier ajout reçu : il y a '..math.floor(clock()-sync.lastSync)..' s' end
+    end
     if self.db then
         local _,ids=LiLiBanque.Wire.digest(self.db.ledger)
         local members=0; for _ in pairs(self.db.roster and self.db.roster.members or {}) do members=members+1 end

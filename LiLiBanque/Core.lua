@@ -1,7 +1,7 @@
 -- LiLiBanque: pure data layer, Lua 5.1. No WoW globals or executable deserialization.
 LiLiBanque = LiLiBanque or {}
 local C = {}; LiLiBanque.Core = C
-C.VERSION = '1.4.1'
+C.VERSION = '1.4.2'
 local moneyKinds = {deposit=true,withdraw=true,repair=true,withdrawForTab=true,buyTab=true,depositSummary=true}
 local eventKinds = {join=true,leave=true,remove=true,promote=true,demote=true,invite=true}
 function C.copy(t) local o={}; for k,v in pairs(t) do o[k]=v end; return o end

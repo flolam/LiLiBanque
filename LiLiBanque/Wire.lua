@@ -65,10 +65,14 @@ local channelFault={[1]=true,[4]=true,[5]=true,[6]=true,[7]=true,[10]=true}
 -- Fixed-rate queue: at most one 200-byte fragment per 0.35s.
 function W.queue(send)
     local q={items={},head=1,tail=0,bulk=0,nextAt=0,send=send,blocked=false}
-    function q:addPacket(chunks,urgent,allowed)
+    function q:addPacket(chunks,urgent,allowed,version)
         if urgent then
             -- One replaceable marker (up to three fragments), separate from bulk capacity.
             self.urgent={chunks=chunks,part=1,urgent=true}
+        elseif version then
+            -- One overdue version announcement; never replaces the gold marker.
+            if self.version or self.active and self.active.version then return false end
+            self.version={chunks=chunks,part=1,version=true}
         else
             if self.bulk+#chunks>2048 then self.overflow=true; return false end
             self.tail=self.tail+1; self.items[self.tail]={chunks=chunks,part=1,allowed=allowed}
@@ -80,15 +84,19 @@ function W.queue(send)
     local function detach(self,packet)
         if self.active then return end
         if packet.urgent then self.urgent=nil
+        elseif packet.version then self.version=nil
         else
             self.items[self.head]=nil; self.head=self.head+1
             if self.head>self.tail then self.head=1; self.tail=0 end
         end
     end
+    -- A true result means the pending version finished or was dropped, so Sync
+    -- can start its next period without accumulating announcements during a pause.
     function q:tick(now,locked)
         if now<self.nextAt then return end
-        local packet=self.active or self.urgent or self.items[self.head]
+        local packet=self.active or self.urgent or self.version or self.items[self.head]
         if not packet then return end
+        local bulk=not (packet.urgent or packet.version)
         if packet.allowed and not packet.allowed() then
             detach(self,packet)
             self.bulk=self.bulk-(#packet.chunks-packet.part+1)
@@ -101,11 +109,11 @@ function W.queue(send)
         -- Enum.SendAddonMessageResult.Success=0; old API can return nil/true.
         if ok and (result==nil or result==true or result==0) then
             detach(self,packet)
-            if not packet.urgent then self.bulk=self.bulk-1 end
+            if bulk then self.bulk=self.bulk-1 end
             packet.part=packet.part+1; packet.failures=nil; self.blocked=false; self.fault=nil
             -- Once any fragment was sent, finish that packet before changing lanes.
             self.active=packet.part<=#packet.chunks and packet or nil
-            return
+            return packet.version and not self.active
         end
         local code=ok and type(result)=='number' and result or nil
         self.lastError=tostring(result)
@@ -115,13 +123,14 @@ function W.queue(send)
         packet.failures=(packet.failures or 0)+1
         if not invalid[code] and packet.failures<3 then self.nextAt=now+5; return end
         detach(self,packet)
-        if not packet.urgent then self.bulk=self.bulk-(#packet.chunks-packet.part+1) end
+        if bulk then self.bulk=self.bulk-(#packet.chunks-packet.part+1) end
         self.active=nil
+        return packet.version
     end
     function q:size()
         local active=self.active
-        return self.bulk+(self.urgent and #self.urgent.chunks or 0)
-            +(active and active.urgent and #active.chunks-active.part+1 or 0)
+        return self.bulk+(self.urgent and #self.urgent.chunks or 0)+(self.version and #self.version.chunks or 0)
+            +(active and (active.urgent or active.version) and #active.chunks-active.part+1 or 0)
     end
     return q
 end

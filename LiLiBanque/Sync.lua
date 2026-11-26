@@ -3,6 +3,8 @@ local S={}; LiLiBanque.Sync=S
 S.PREFIX='LiLiBanque1'
 local FIRST_PAGE,HISTORY_PAGE=6,12
 local RETRY_DELAY,RETRY_LIMIT=12,60
+local HELLO_INTERVAL,OFFICER_WINDOW=120,900
+local VERSION_GRACE=8
 local PEER_FRESH=150 -- monotonic seconds, slightly longer than the periodic H
 local STATUS_RANK={matched=1,checking=2,catchup=3}
 -- At most nine wire fragments per stock batch; leave room for journal traffic.
@@ -16,8 +18,8 @@ local function decimal(s,lo,hi)
         local n=tonumber(s); if integer(n,lo,hi) then return n end
     end
 end
-local function stockText(s)
-    if type(s)~='string' or #s>120 or not s:find('%S') or s:find('[%c|]') then return false end
+local function plainText(s,limit)
+    if type(s)~='string' or #s>limit or not s:find('%S') or s:find('[%c|]') then return false end
     -- Validate UTF-8 before letting remote strings reach WoW widgets or the export.
     local i=1
     while i<=#s do
@@ -44,8 +46,14 @@ local function stockItem(s)
     return true
 end
 local function stockHeader(s,wall)
-    return type(s)=='table' and C.validScanAt(s.scannedAt,wall) and stockText(s.name)
-        and stockText(s.scannedBy) and integer(s.icon,1,2147483647) and type(s.slots)=='table'
+    return type(s)=='table' and C.validScanAt(s.scannedAt,wall) and plainText(s.name,120)
+        and plainText(s.scannedBy,120) and integer(s.icon,1,2147483647) and type(s.slots)=='table'
+end
+local function validVersion(s)
+    if type(s)~='string' or #s>16 then return false end
+    local a,b,c=s:match('^([0-9]+)%.([0-9]+)%.([0-9]+)$')
+    local function canonical(n) return #n==1 or n:sub(1,1)~='0' end
+    return a~=nil and canonical(a) and canonical(b) and canonical(c)
 end
 local function allow(policy,key,tab,snapshot)
     local fn=policy[key]; if type(fn)~='function' then return false end
@@ -129,7 +137,7 @@ local function stockTransport(self,wallTime,policy,stockId)
                     local slot,packed,n,q,name=f[i]:match('^(%d+)|([%d.item%-]+)|(%d+)|(%d+)|([^|]+)$')
                     slot,n,q=decimal(slot,1,STOCK_SLOTS),decimal(n,1,1000),decimal(q,0,8)
                     local item=packed and packed:gsub('%.',':')
-                    if not slot or slot<=p.lastSlot or not n or not q or not stockItem(item) or not stockText(name) then
+                    if not slot or slot<=p.lastSlot or not n or not q or not stockItem(item) or not plainText(name,120) then
                         receiving[sender]=nil; return
                     end
                     p.s.slots[slot]={item=item,count=n,quality=q,name=name}; p.lastSlot=slot
@@ -144,7 +152,7 @@ local function stockTransport(self,wallTime,policy,stockId)
         local ids,rows={},{}
         for slot,row in pairs(s.slots) do
             if not integer(slot,1,STOCK_SLOTS) or type(row)~='table' or not stockItem(row.item)
-                or not integer(row.count,1,1000) or not integer(row.quality,0,8) or not stockText(row.name) then return end
+                or not integer(row.count,1,1000) or not integer(row.quality,0,8) or not plainText(row.name,120) then return end
             ids[#ids+1]=slot
         end
         table.sort(ids)
@@ -235,6 +243,35 @@ end
 function S.new(db,state,name,guild,send,clock,wallTime,stockPolicy)
     wallTime=wallTime or clock
     local self={db=db,state=state,name=name,guild=guild,q=W.queue(send),rx=W.receiver(),clock=clock,serial=0,peers={},seen={},seenCount=0,transferred=0,nextHello=0,turn=0}
+    local version=validVersion(C.VERSION) and C.VERSION
+    local nextVersion=clock()
+    local function remember(peerName,sender,now,declared)
+        if not plainText(peerName,150) then return end
+        local seen=self.seen[peerName]
+        if not seen and self.seenCount>=64 then
+            for k,p in pairs(self.seen) do
+                if now-p.at>OFFICER_WINDOW then self.seen[k]=nil; self.seenCount=self.seenCount-1 end
+            end
+            if self.seenCount>=64 then return end
+        end
+        if not seen then self.seenCount=self.seenCount+1 end
+        if not seen or seen.sender~=sender or now-seen.at>OFFICER_WINDOW then
+            seen={sender=sender}; self.seen[peerName]=seen
+        end
+        seen.at=now
+        if declared then seen.version,seen.versionAt=declared,now end
+    end
+    function self:officersSeen(now)
+        now=now or self.clock()
+        local list={}
+        for peerName,seen in pairs(self.seen) do
+            if now-seen.at<=OFFICER_WINDOW then
+                list[#list+1]={name=peerName,version=seen.versionAt and now-seen.versionAt<=OFFICER_WINDOW and seen.version or nil}
+            end
+        end
+        table.sort(list,function(a,b) return a.name<b.name end)
+        return list
+    end
     local epoch=string.format('%x',math.floor(clock()*1000)%2147483647)
     local function stockId(serial) return 's'..epoch..'-'..serial end
     function self:packet(op,target,col,values,guard,maxBytes)
@@ -244,7 +281,8 @@ function S.new(db,state,name,guild,send,clock,wallTime,stockPolicy)
         self.serial=self.serial+1
         local chunks=W.chunks(payload,col=='stock' and stockId(self.serial) or tostring(self.serial))
         -- Only broadcast scan markers share the priority slot; never coalesce distinct targets.
-        return self.q:addPacket(chunks,op=='B' and col=='bankScan' and fields[3]=='' and #payload<=512,guard)
+        return self.q:addPacket(chunks,op=='B' and col=='bankScan' and fields[3]=='' and #payload<=512,guard,
+            op=='V' and col=='version' and fields[3]=='')
     end
     local stockHello,stockReceive,stockWork=stockTransport(self,wallTime,stockPolicy,stockId)
     function self:bankScan(target)
@@ -255,7 +293,7 @@ function S.new(db,state,name,guild,send,clock,wallTime,stockPolicy)
         for _,col in ipairs({'ledger','events'}) do local digest=W.digest(C.observations(self.db,self.state,col)); self:packet('H',target,col,{digest}) end
         self:bankScan(target)
         stockHello()
-        self.nextHello=self.clock()+120
+        self.nextHello=self.clock()+HELLO_INTERVAL
     end
     function self:status(now)
         now=now or self.clock()
@@ -368,17 +406,21 @@ function S.new(db,state,name,guild,send,clock,wallTime,stockPolicy)
             stockReceive(f[1],f,sender,peerName,now,#payload)
             return
         end
+        local op,col=f[1],f[4]
+        -- Display-only broadcast. Older clients ignore the separate column;
+        -- never let a version packet change the peer's journal jobs or proof.
+        if col=='version' then
+            if op=='V' and f[3]=='' and #payload<=512 and #f==6 and validVersion(f[6]) then
+                remember(peerName,sender,now,f[6])
+            end
+            return
+        end
         if peer.name~=peerName then
             peer.name=peerName; peer.hello={}; peer.jobs={}; peer.requests={}
             peer.ledgerAt=nil; peer.ledgerCompared=nil; peer.ledgerWorkAt=nil; peer.echo=nil
         end
-        -- Officers seen this session (display only): bounded like peers.
-        if self.seen[peerName] or self.seenCount<64 then
-            if not self.seen[peerName] then self.seenCount=self.seenCount+1 end
-            self.seen[peerName]=now
-        end
+        if col=='ledger' or col=='events' or op=='B' and col=='bankScan' then remember(peerName,sender,now) end
         table.remove(f,5) -- remaining fields have the stable v1 operation layout below
-        local op,col=f[1],f[4]
         -- 1.1.x rejects this new column before interpreting its unknown operation.
         if op=='B' and col=='bankScan' then
             if #payload>512 or #f~=5 or #f[5]>10 or not f[5]:match('^%d+$') then return end
@@ -455,7 +497,8 @@ function S.new(db,state,name,guild,send,clock,wallTime,stockPolicy)
     end
     function self:tick(now,locked)
         self.locked=locked
-        self.q:tick(now,locked)
+        if self.q:tick(now,locked) then nextVersion=now+HELLO_INTERVAL end
+        local idle
         if self.q:size()==0 then
             if now>=self.nextHello and not locked then self:hello(); self.q.overflow=nil; self.confirmAt=nil
             elseif not locked and self.confirmAt and now>=self.confirmAt then
@@ -464,8 +507,16 @@ function S.new(db,state,name,guild,send,clock,wallTime,stockPolicy)
                 self.confirmAt=nil
             -- Leave a response window after each packet. R/D traffic can take the
             -- queue before another inventory page; at most one page is queued.
-            elseif not locked and now>=self.q.nextAt+0.7 and not self:retryRequests(now) and not stockWork(now) then self:inventoryPage() end
+            elseif not locked and now>=self.q.nextAt+0.7 and not self:retryRequests(now) and not stockWork(now) then
+                self:inventoryPage()
+                idle=self.q:size()==0
+            end
         end
+        -- Prefer idle time; after a short grace period, take one packet boundary
+        -- during catch-up. Wire still finishes active packets and sends B first.
+        if version and nextVersion and not locked and not self.q.blocked and not self.q.fault
+            and now>=nextVersion and (idle or now>=nextVersion+VERSION_GRACE)
+            and self:packet('V','','version',{version},nil,512) then nextVersion=nil end
     end
     return self
 end

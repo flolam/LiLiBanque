@@ -70,7 +70,17 @@ function bank.build(panel)
     values.sync=text(panel,'GameFontHighlight'); values.sync:SetPoint('TOPLEFT',SPLIT+12,-28); values.sync:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-10,-28)
     values.sync:SetWordWrap(true); values.sync:SetHeight(30)
     values.peers=text(panel,'GameFontHighlightSmall'); values.peers:SetPoint('TOPLEFT',SPLIT+12,-60); values.peers:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-10,-60)
-    values.peers:SetWordWrap(true); values.peers:SetHeight(40)
+    panel.peerRows={}
+    for i=1,2 do
+        local y=-60-i*13
+        local version=text(panel,'GameFontHighlightSmall','RIGHT')
+        version:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-10,y); version:SetWidth(104)
+        local name=text(panel,'GameFontHighlightSmall')
+        name:SetPoint('TOPLEFT',SPLIT+12,y); name:SetPoint('TOPRIGHT',version,'TOPLEFT',-6,0)
+        panel.peerRows[i]={name=name,version=version}
+    end
+    values.lastSync=text(panel,'GameFontHighlightSmall')
+    values.lastSync:SetPoint('TOPLEFT',SPLIT+12,-86); values.lastSync:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-10,-86)
     local top=rule(panel,true); top:SetPoint('TOPLEFT',8,-102); top:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-8,-102)
     -- Gap alert: only takes room when a gap exists.
     local alert=CreateFrame('Frame',nil,panel); alert:SetPoint('TOPLEFT',6,-108); alert:SetPoint('TOPRIGHT',panel,'TOPRIGHT',-6,-108); alert:SetHeight(48)
@@ -165,15 +175,16 @@ function bank.refresh(panel)
     v.money:SetText(GREY..'Solde :|r '..(money and A.money(money.copper)..(stale and GREY..' le '..UI.when(money.at)..'|r' or '') or GREY..'pas encore relevé|r'))
     local sync=A.sync
     v.sync:SetText((bank.syncText(sync,A.clock())))
-    if not sync then v.peers:SetText('')
-    else
-        local seen={}
-        for name,at in pairs(sync.seen or {}) do if A.clock()-at<=900 then seen[#seen+1]=name end end
-        table.sort(seen)
-        for i,name in ipairs(seen) do seen[i]=UI.classColored(name) end
-        local who=#seen>0 and 'Officiers vus : '..table.concat(seen,GREY..', ') or 'Aucun officier vu ces 15 min'
-        v.peers:SetText(who..(sync.lastSync and '\n'..GREY..'Dernier ajout reçu '..UI.ago(A.clock()-sync.lastSync)..'|r' or ''))
+    local seen=sync and sync:officersSeen() or {}
+    local more=#seen-#panel.peerRows
+    local heading=#seen>0 and ('Officiers vus'..(more>0 and (' (+'..more..')') or '')..' · /lili diag') or 'Aucun officier vu ces 15 min'
+    v.peers:SetText(sync and heading or '')
+    for i,row in ipairs(panel.peerRows) do
+        local peer=seen[i]
+        row.name:SetText(peer and UI.classColored(peer.name) or '')
+        row.version:SetText(peer and (peer.version or GREY..'version inconnue|r') or '')
     end
+    v.lastSync:SetText(not seen[2] and sync and sync.lastSync and GREY..'Dernier ajout reçu '..UI.ago(A.clock()-sync.lastSync)..'|r' or '')
     local gaps=db and db.gaps or {}
     v.gaps:SetText(#gaps==0 and 'aucun' or BRICK..'Trous dans le journal : |r'..RED..#gaps..'|r, dernier le '..UI.when(gaps[#gaps].at)..'\n'..RED..A:gapText()..'|r')
     bank.place(panel,#gaps>0)

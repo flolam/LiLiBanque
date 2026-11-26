@@ -115,6 +115,40 @@ test('un refus de transport est identifiable dans /lili diag',function()
     has(table.concat(A:diagLines(),'\n'),'envoi refusé (code 10)')
 end)
 
+test('versions par personnage : deux lignes au journal, liste complète et fraîche dans /lili diag',function()
+    local A,fire,_,panel=openWithScan()
+    local W=LiLiBanque.Wire
+    local function receive(name,id,version)
+        local fields=version and {'V',A.guild,'','version',name,version}
+            or {'H',A.guild,'','ledger',name,'0:1505'}
+        for _,msg in ipairs(W.chunks(W.pack(fields),id)) do
+            fire('CHAT_MSG_ADDON',LiLiBanque.Sync.PREFIX,msg,'OFFICER',name:gsub(' ','-')..'-Realm')
+        end
+    end
+    receive('Andor Poussière','off1','7.2.3')
+    NOW=NOW+10
+    receive('Brenø Nom','off2')
+    receive('Cyra Brume','off3','6.0.1')
+    receive(A.name,'off4','9.9.9')
+    A:updateUI()
+    has(panel.values.peers.text,'Officiers vus'); has(panel.values.peers.text,'+1'); has(panel.values.peers.text,'/lili diag')
+    eq(#panel.peerRows,2)
+    has(panel.peerRows[1].name.text,'Andor Poussière'); has(panel.peerRows[1].version.text,'7.2.3')
+    has(panel.peerRows[2].name.text,'Brenø Nom'); has(panel.peerRows[2].version.text,'version inconnue')
+    eq(panel.peerRows[2].name.wrap,false)
+    hasnt(MOCK.texts(LiLiBanqueFrame),'Cyra Brume'); hasnt(MOCK.texts(LiLiBanqueFrame),'en ligne')
+    local chat={}; DEFAULT_CHAT_FRAME.AddMessage=function(_,line) chat[#chat+1]=line end
+    SlashCmdList.LILIBANQUE('diag')
+    local diag=table.concat(chat,'\n')
+    has(diag,'Andor Poussière : 7.2.3'); has(diag,'Brenø Nom : version inconnue'); has(diag,'Cyra Brume : 6.0.1')
+    hasnt(diag,'9.9.9')
+    NOW=NOW+891; A:updateUI()
+    has(panel.peerRows[1].name.text,'Brenø Nom'); has(panel.peerRows[2].name.text,'Cyra Brume')
+    hasnt(table.concat(A:diagLines(),'\n'),'Andor Poussière')
+    NOW=NOW+10; A:updateUI()
+    has(panel.values.peers.text,'Aucun officier vu ces 15 min'); eq(panel.peerRows[1].name.text,'')
+end)
+
 test('états clairsemés : aucun mouvement, noms longs tronqués, dix lignes au plus',function()
     local A,fire=load({})
     SlashCmdList.LILIBANQUE(''); local panel=LiLiBanque.UI.sections[1].panel
